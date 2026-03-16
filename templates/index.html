@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Livestock AI Assistant</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Highlight.js for Code Blocks (Optional depending on output) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=2">
+</head>
+
+<body>
+
+    <!-- Animated Background Mesh Elements -->
+    <div class="mesh-bg mesh-bg-1"></div>
+    <div class="mesh-bg mesh-bg-2"></div>
+
+    <div class="app-layout">
+        <!-- Sidebar for Conversation History -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h2>Conversations</h2>
+            </div>
+            <button class="new-chat-btn" onclick="startNewThread()">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                </svg>
+            </button>
+            <ul class="thread-list" id="threadList">
+                <!-- Thread items populated by JS -->
+            </ul>
+        </aside>
+
+        <div class="chat-container">
+            <!-- Header -->
+            <header class="chat-header">
+                <button class="menu-toggle-btn" aria-label="Toggle Sidebar" onclick="toggleSidebar()">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="3" y1="12" x2="21" y2="12"></line>
+                        <line x1="3" y1="6" x2="21" y2="6"></line>
+                        <line x1="3" y1="18" x2="21" y2="18"></line>
+                    </svg>
+                </button>
+                <div class="bot-avatar">
+                    &#128017;
+                    <div class="status-indicator"></div>
+                </div>
+                <div class="header-info">
+                    <h1>AI Assistant</h1>
+                    <p></p>
+                </div>
+            </header>
+
+            <!-- Message List -->
+            <main class="chat-body" id="chatWindow">
+                <div class="message assistant-message intro-msg" dir="rtl">
+                    <div class="message-content">
+                        <p>مرحباً! أنا مساعدك الذكي، كيف يمكنني مساعدتك اليوم؟</p>
+                    </div>
+                </div>
+            </main>
+
+            <!-- Input Area -->
+            <footer class="chat-footer">
+                <div class="input-wrapper">
+                    <textarea id="userInput" dir="auto" placeholder="اكتب رسالتك هنا..."></textarea>
+                    <button id="sendBtn" class="send-btn" aria-label="Send Message">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="22" y1="2" x2="11" y2="13"></line>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        </svg>
+                    </button>
+                </div>
+            </footer>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}?v=2"></script>
+</body>
+
+</html>
