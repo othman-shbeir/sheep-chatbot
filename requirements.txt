@@ -8,3 +8,7 @@ langchain-mistralai==1.1.1
 langgraph==1.1.0
 ddgs
 langchain-google-genai
+
+sqlalchemy
+psycopg2-binary
+

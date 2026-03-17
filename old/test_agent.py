@@ -4,7 +4,7 @@ import sys
 # Add project path so we can import agent
 sys.path.append(r"d:\Sheep Project")
 
-from agent import run_agent
+from services.agent import run_agent
 
 
 def main():
