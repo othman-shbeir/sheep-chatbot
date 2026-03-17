@@ -1,5 +1,6 @@
 import os
 from functools import lru_cache
+import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -14,7 +15,9 @@ from app.db import (
     get_messages_after_summary,
     get_or_create_thread,
     get_or_create_user,
+    get_thread_messages_for_user,
     get_threads_for_user,
+    thread_belongs_to_user,
 )
 from app.utils import extract_text_content
 
@@ -232,10 +235,31 @@ def get_all_threads(user_email: str) -> list[dict]:
         return get_threads_for_user(session, user_email)
 
 
-def get_thread_history(thread_id: str) -> list[dict]:
+class ThreadNotFoundError(Exception):
+    pass
+
+
+def get_thread_history(thread_id: str, user_id: str) -> list[dict]:
     require_database()
+    thread_id = (thread_id or "").strip()
+    user_id = (user_id or "").strip()
+
+    if not thread_id:
+        raise ValueError("thread_id is required.")
+
+    if not user_id:
+        raise ValueError("user_id is required.")
+
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except Exception as e:
+        raise ValueError("user_id must be a valid UUID.") from e
+
     with SessionLocal() as session:
-        messages = get_all_messages(session, thread_id)
+        if not thread_belongs_to_user(session, thread_id=thread_id, user_id=user_uuid):
+            raise ThreadNotFoundError("Thread not found.")
+
+        messages = get_thread_messages_for_user(session, thread_id=thread_id, user_id=user_uuid)
 
     return [
         {

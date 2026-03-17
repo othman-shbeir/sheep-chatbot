@@ -1,6 +1,6 @@
 from flask import Blueprint, jsonify, request
 
-from app.services.agent import get_all_threads, get_thread_history, run_agent
+from app.services.agent import ThreadNotFoundError, get_all_threads, get_thread_history, run_agent
 
 chat_bp = Blueprint("chat",__name__)
 
@@ -113,13 +113,36 @@ def threads():
 @chat_bp.route("/threads/<thread_id>/history", methods=["GET"])
 def thread_history(thread_id):
     try:
-        history = get_thread_history(thread_id)
+        user_id = request.args.get("user_id", "").strip()
+
+        if not user_id:
+            return jsonify({
+                "status": "error",
+                "message": "The 'user_id' query parameter is required.",
+                "data": None,
+            }), 400
+
+        history = get_thread_history(thread_id, user_id)
 
         return jsonify({
             "status": "success",
             "message": "Thread history fetched successfully.",
             "data": history,
         }), 200
+
+    except ThreadNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": "Thread not found.",
+            "data": None,
+        }), 404
+
+    except ValueError as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "data": None,
+        }), 400
 
     except Exception as e:
         return jsonify({

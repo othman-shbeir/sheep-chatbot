@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -117,6 +118,21 @@ def get_all_messages(session: Session, thread_id: str) -> list[ThreadMessage]:
     stmt = (
         select(ThreadMessage)
         .where(ThreadMessage.thread_id == thread_id)
+        .order_by(ThreadMessage.message_order.asc())
+    )
+    return list(session.execute(stmt).scalars().all())
+
+
+def thread_belongs_to_user(session: Session, thread_id: str, user_id: UUID) -> bool:
+    stmt = select(Thread.id).where(Thread.id == thread_id, Thread.user_id == user_id)
+    return session.execute(stmt).scalar_one_or_none() is not None
+
+
+def get_thread_messages_for_user(session: Session, thread_id: str, user_id: UUID) -> list[ThreadMessage]:
+    stmt = (
+        select(ThreadMessage)
+        .join(Thread, ThreadMessage.thread_id == Thread.id)
+        .where(Thread.id == thread_id, Thread.user_id == user_id)
         .order_by(ThreadMessage.message_order.asc())
     )
     return list(session.execute(stmt).scalars().all())

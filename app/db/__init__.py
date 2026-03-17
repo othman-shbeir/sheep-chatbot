@@ -8,6 +8,8 @@ from .repository import (
     get_latest_summary,
     get_messages_after_summary,
     get_all_messages,
+    get_thread_messages_for_user,
+    thread_belongs_to_user,
     create_summary,
     get_threads_for_user,
 )
@@ -28,6 +30,8 @@ __all__ = [
     "get_latest_summary",
     "get_messages_after_summary",
     "get_all_messages",
+    "get_thread_messages_for_user",
+    "thread_belongs_to_user",
     "create_summary",
     "get_threads_for_user",
 ]
