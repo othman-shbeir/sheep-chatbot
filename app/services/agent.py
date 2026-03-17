@@ -228,6 +228,72 @@ def run_agent(
     return assistant_text
 
 
+def run_agent_stream(
+    user_input: str,
+    thread_id: str,
+    user_email: str,
+    user_name: str | None = None,
+):
+    require_database()
+    thread_id = (thread_id or "").strip()
+    user_input = (user_input or "").strip()
+    user_email = (user_email or "").strip().lower()
+
+    if not thread_id:
+        raise ValueError("thread_id is required.")
+
+    if not user_input:
+        raise ValueError("user_input is required.")
+
+    if not user_email:
+        raise ValueError("user_email is required.")
+
+    with SessionLocal() as session:
+        user = get_or_create_user(session, email=user_email, name=user_name)
+
+        title = user_input[:60]
+        if len(user_input) > 60:
+            title += "..."
+
+        get_or_create_thread(
+            session=session,
+            thread_id=thread_id,
+            user_id=user.id,
+            title=title,
+        )
+
+        add_message(
+            session=session,
+            thread_id=thread_id,
+            role="user",
+            content=user_input,
+        )
+        session.commit()
+
+    context_messages = build_context_messages(thread_id)
+
+    assistant_parts: list[str] = []
+    for chunk in get_model_with_search().stream(context_messages):
+        delta = extract_text_content(chunk)
+        if not delta:
+            continue
+        assistant_parts.append(delta)
+        yield delta
+
+    assistant_text = "".join(assistant_parts).strip()
+
+    with SessionLocal() as session:
+        add_message(
+            session=session,
+            thread_id=thread_id,
+            role="assistant",
+            content=assistant_text,
+        )
+        session.commit()
+
+    maybe_compact_thread(thread_id)
+
+
 def get_all_threads(user_email: str) -> list[dict]:
     require_database()
     user_email = user_email.strip().lower()

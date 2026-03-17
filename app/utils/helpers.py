@@ -1,4 +1,5 @@
 from langchain_core.messages import BaseMessage
+import json
 
 
 def extract_text_content(message: BaseMessage) -> str:
@@ -20,3 +21,8 @@ def extract_text_content(message: BaseMessage) -> str:
         return "\n".join(parts).strip()
 
     return str(content).strip()
+
+
+def format_sse(event: str, data: dict) -> str:
+    payload = json.dumps(data, ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"

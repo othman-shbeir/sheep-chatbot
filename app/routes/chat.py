@@ -1,6 +1,13 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
-from app.services.agent import ThreadNotFoundError, get_all_threads, get_thread_history, run_agent
+from app.services.agent import (
+    ThreadNotFoundError,
+    get_all_threads,
+    get_thread_history,
+    run_agent,
+    run_agent_stream,
+)
+from app.utils import format_sse
 
 chat_bp = Blueprint("chat",__name__)
 
@@ -62,6 +69,82 @@ def chat():
                 "assistant_message": answer,
             },
         }), 200
+
+    except ValueError as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "data": None,
+        }), 400
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": "An unexpected error occurred.",
+            "data": {
+                "details": str(e),
+            },
+        }), 500
+
+
+@chat_bp.route("/chat/stream", methods=["POST"])
+def chat_stream():
+    try:
+        data = request.get_json(force=True)
+
+        message = str(data.get("message", "")).strip()
+        thread_id = str(data.get("thread_id", "")).strip()
+        user_email = str(data.get("user_email", "")).strip()
+        user_name = data.get("user_name")
+
+        if not message:
+            return jsonify({
+                "status": "error",
+                "message": "The 'message' field is required.",
+                "data": None,
+            }), 400
+
+        if not thread_id:
+            return jsonify({
+                "status": "error",
+                "message": "The 'thread_id' field is required.",
+                "data": None,
+            }), 400
+
+        if not user_email:
+            return jsonify({
+                "status": "error",
+                "message": "The 'user_email' field is required.",
+                "data": None,
+            }), 400
+
+        def generate():
+            assistant_parts: list[str] = []
+            try:
+                for delta in run_agent_stream(
+                    user_input=message,
+                    thread_id=thread_id,
+                    user_email=user_email,
+                    user_name=user_name,
+                ):
+                    assistant_parts.append(delta)
+                    yield format_sse("delta", {"delta": delta})
+
+                assistant_text = "".join(assistant_parts).strip()
+                yield format_sse(
+                    "done",
+                    {
+                        "thread_id": thread_id,
+                        "assistant_message": assistant_text,
+                    },
+                )
+            except Exception as e:
+                yield format_sse("error", {"message": str(e)})
+
+        resp = Response(generate(), mimetype="text/event-stream")
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["X-Accel-Buffering"] = "no"
+        return resp
 
     except ValueError as e:
         return jsonify({
