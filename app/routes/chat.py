@@ -1,4 +1,4 @@
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, jsonify, render_template, request
 
 from app.services.agent import (
     ThreadNotFoundError,
@@ -19,6 +19,11 @@ def health():
         "message": "Chatbot API is running.",
         "data": None,
     }), 200
+
+
+@chat_bp.route("/ui", methods=["GET"])
+def ui():
+    return render_template("index.html")
 
 
 @chat_bp.route("/chat", methods=["POST"])

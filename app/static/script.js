@@ -1,6 +1,8 @@
 const chatWindow = document.getElementById('chatWindow');
 const userInput = document.getElementById('userInput');
 const sendBtn = document.getElementById('sendBtn');
+const userEmailInput = document.getElementById('userEmail');
+const streamToggle = document.getElementById('streamToggle');
 
 // Initialize markdown parser options
 marked.setOptions({
@@ -18,6 +20,10 @@ function detectDir(text) {
 
 let currentThreadId = null;
 let allThreads = [];
+let useStreaming = false;
+
+const LS_USER_EMAIL = 'sheep_ui_user_email';
+const LS_USE_STREAMING = 'sheep_ui_use_streaming';
 
 const INTRO_MSG = `
     <div class="message assistant-message intro-msg" dir="rtl">
@@ -28,6 +34,26 @@ const INTRO_MSG = `
 
 // Initialize on page load
 window.addEventListener('DOMContentLoaded', async () => {
+    // Restore UI state
+    const savedEmail = localStorage.getItem(LS_USER_EMAIL);
+    if (savedEmail && userEmailInput) userEmailInput.value = savedEmail;
+
+    const savedStreaming = localStorage.getItem(LS_USE_STREAMING);
+    useStreaming = savedStreaming === 'true';
+    if (streamToggle) streamToggle.checked = useStreaming;
+
+    if (userEmailInput) {
+        userEmailInput.addEventListener('change', () => {
+            localStorage.setItem(LS_USER_EMAIL, userEmailInput.value.trim());
+        });
+    }
+    if (streamToggle) {
+        streamToggle.addEventListener('change', () => {
+            useStreaming = !!streamToggle.checked;
+            localStorage.setItem(LS_USE_STREAMING, String(useStreaming));
+        });
+    }
+
     await fetchThreads();  // load history first
     startNewThread();      // then show fresh chat
 });
@@ -75,6 +101,23 @@ function appendBotMessage(markdownText) {
     chatWindow.scrollTop = chatWindow.scrollHeight;
 }
 
+function createBotMessageBubble(initialText = '') {
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'message assistant-message';
+    msgDiv.setAttribute('dir', detectDir(initialText));
+    msgDiv.innerHTML = `<div class="message-content">${marked.parse(initialText)}</div>`;
+    chatWindow.appendChild(msgDiv);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+    return msgDiv;
+}
+
+function updateBotMessageBubble(msgDiv, markdownText) {
+    const content = msgDiv.querySelector('.message-content');
+    msgDiv.setAttribute('dir', detectDir(markdownText));
+    if (content) content.innerHTML = marked.parse(markdownText);
+    chatWindow.scrollTop = chatWindow.scrollHeight;
+}
+
 function appendLoader() {
     const loaderDiv = document.createElement('div');
     loaderDiv.className = 'message assistant-message';
@@ -116,6 +159,13 @@ async function sendMessage() {
     const text = userInput.value.trim();
     if (!text) return;
 
+    const userEmail = (userEmailInput?.value || '').trim();
+    if (!userEmail) {
+        appendBotMessage("⚠️ **Error**: Please enter your email first.");
+        userEmailInput?.focus();
+        return;
+    }
+
     userInput.value = '';
     userInput.style.height = '48px';
     sendBtn.disabled = true;
@@ -123,22 +173,105 @@ async function sendMessage() {
     appendLoader();
 
     try {
-        const response = await fetch('/chat', {
+        if (!useStreaming) {
+            const response = await fetch('/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text, thread_id: currentThreadId, user_email: userEmail })
+            });
+
+            const json = await response.json();
+            removeLoader();
+
+            if (response.ok && json.status === 'success') {
+                appendBotMessage(json.data.assistant_message || '');
+                await fetchThreads();
+            } else {
+                appendBotMessage("⚠️ **Error**: Something went wrong communicating with the server.");
+            }
+            return;
+        }
+
+        // Streaming mode (SSE)
+        const response = await fetch('/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text, thread_id: currentThreadId })
+            body: JSON.stringify({ message: text, thread_id: currentThreadId, user_email: userEmail })
         });
 
-        const json = await response.json();
         removeLoader();
 
-        if (response.ok && json.status === 'success') {
-            appendBotMessage(json.data.assistant_response);
-            // Refresh the sidebar — this is when the thread becomes known to backend
-            await fetchThreads();
-        } else {
-            appendBotMessage("⚠️ **Error**: Something went wrong communicating with the server.");
+        if (!response.ok || !response.body) {
+            appendBotMessage("⚠️ **Error**: Failed to start streaming.");
+            return;
         }
+
+        const bubble = createBotMessageBubble('');
+        let fullText = '';
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        let rafScheduled = false;
+
+        const scheduleRender = () => {
+            if (rafScheduled) return;
+            rafScheduled = true;
+            requestAnimationFrame(() => {
+                rafScheduled = false;
+                updateBotMessageBubble(bubble, fullText);
+            });
+        };
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const frames = buffer.split('\n\n');
+            buffer = frames.pop() || '';
+
+            for (const frame of frames) {
+                const lines = frame.split('\n').map(l => l.trimEnd());
+                let eventName = 'message';
+                let dataLine = '';
+
+                for (const line of lines) {
+                    if (line.startsWith('event:')) eventName = line.slice(6).trim();
+                    if (line.startsWith('data:')) dataLine += line.slice(5).trim();
+                }
+
+                if (!dataLine) continue;
+
+                let payload = null;
+                try { payload = JSON.parse(dataLine); } catch { payload = { raw: dataLine }; }
+
+                if (eventName === 'delta') {
+                    const delta = payload?.delta || '';
+                    if (delta) {
+                        fullText += delta;
+                        scheduleRender();
+                    }
+                } else if (eventName === 'done') {
+                    const assistantMessage = payload?.assistant_message;
+                    if (typeof assistantMessage === 'string' && assistantMessage.length >= fullText.length) {
+                        fullText = assistantMessage;
+                        scheduleRender();
+                    }
+                    await fetchThreads();
+                    try { await reader.cancel(); } catch {}
+                    return;
+                } else if (eventName === 'error') {
+                    const msg = payload?.message || 'Streaming error';
+                    updateBotMessageBubble(bubble, `⚠️ **Error**: ${msg}`);
+                    try { await reader.cancel(); } catch {}
+                    return;
+                }
+            }
+        }
+
+        // Stream ended without done
+        if (!fullText) updateBotMessageBubble(bubble, "⚠️ **Error**: Stream ended unexpectedly.");
     } catch (e) {
         removeLoader();
         console.error(e);
