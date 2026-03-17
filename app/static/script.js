@@ -82,7 +82,7 @@ function startNewThread() {
     }
 }
 
-// ─── DOM helpers ───────────────────────────────────────────────────────────
+//  DOM helpers 
 function appendUserMessage(text) {
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message user-message';
@@ -138,7 +138,7 @@ function removeLoader() {
     if (loader) loader.remove();
 }
 
-// ─── Auto-resize textarea ──────────────────────────────────────────────────
+// Auto-resize textarea 
 userInput.addEventListener('input', function () {
     this.style.height = '48px';
     this.style.height = Math.min(this.scrollHeight, 150) + 'px';
@@ -154,7 +154,7 @@ userInput.addEventListener('keydown', function (e) {
 
 sendBtn.addEventListener('click', sendMessage);
 
-// ─── Send Message ──────────────────────────────────────────────────────────
+//  Send Message 
 async function sendMessage() {
     const text = userInput.value.trim();
     if (!text) return;
@@ -282,7 +282,7 @@ async function sendMessage() {
     }
 }
 
-// ─── Conversation History ──────────────────────────────────────────────────
+//  Conversation History 
 
 async function fetchThreads() {
     try {

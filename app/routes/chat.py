@@ -135,7 +135,7 @@ def chat_stream():
                     assistant_parts.append(delta)
                     yield format_sse("delta", {"delta": delta})
 
-                assistant_text = "".join(assistant_parts).strip()
+                assistant_text = " ".join(assistant_parts).strip()
                 yield format_sse(
                     "done",
                     {
