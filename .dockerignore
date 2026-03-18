@@ -1,0 +1,13 @@
+__pycache__/
+venv/
+.env
+.git/
+.gitignore
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.venv/
+.idea/
+.vscode/
