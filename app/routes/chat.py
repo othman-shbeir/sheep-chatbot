@@ -1,5 +1,6 @@
 from flask import Blueprint, Response, jsonify, render_template, request
-
+from celery.result import AsyncResult
+from app.celery_app import celery_app
 from app.services.agent import (
     ThreadNotFoundError,
     get_all_threads,
@@ -8,6 +9,8 @@ from app.services.agent import (
     run_agent_stream,
 )
 from app.utils import format_sse
+from app.tasks.chat_tasks import process_chat_message
+
 
 chat_bp = Blueprint("chat",__name__)
 
@@ -57,23 +60,28 @@ def chat():
                 "data": None,
             }), 400
 
-        answer = run_agent(
-            user_input=message,
-            thread_id=thread_id,
-            user_email=user_email,
-            user_name=user_name,
-        )
-
-        return jsonify({
-            "status": "success",
-            "message": "Response generated successfully.",
-            "data": {
+        task = process_chat_message.apply_async(
+            kwargs={
+                "user_input": message,
                 "thread_id": thread_id,
                 "user_email": user_email,
-                "user_message": message,
-                "assistant_message": answer,
+                "user_name": user_name,
             },
-        }), 200
+            queue="chat",
+        )
+
+        return jsonify(
+            {
+                "status": "accepted",
+                "message": "Message queued successfully.",
+                "data": {
+                    "task_id": task.id,
+                    "thread_id": thread_id,
+                    "user_email": user_email,
+                    "state": "PENDING",
+                },
+            }
+        ), 202
 
     except ValueError as e:
         return jsonify({
@@ -91,6 +99,57 @@ def chat():
             },
         }), 500
 
+@chat_bp.route("/tasks/<task_id>", methods=["GET"])
+def task_status(task_id):
+    try:
+        result = AsyncResult(task_id, app=celery_app)
+        state = result.state
+
+        if state == "SUCCESS":
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": "Task completed successfully.",
+                    "data": {
+                        "task_id": task_id,
+                        "state": state,
+                        "result": result.result,
+                    },
+                }
+            ), 200
+
+        if state == "FAILURE":
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Task failed.",
+                    "data": {
+                        "task_id": task_id,
+                        "state": state,
+                        "error": str(result.result),
+                    },
+                }
+            ), 500
+
+        return jsonify(
+            {
+                "status": "success",
+                "message": "Task is still processing.",
+                "data": {
+                    "task_id": task_id,
+                    "state": state,
+                },
+            }
+        ), 200
+
+    except Exception as e:
+        return jsonify(
+            {
+                "status": "error",
+                "message": "Failed to fetch task status.",
+                "data": {"details": str(e)},
+            }
+        ), 500
 
 @chat_bp.route("/chat/stream", methods=["POST"])
 def chat_stream():
