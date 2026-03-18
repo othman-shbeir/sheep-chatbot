@@ -24,7 +24,7 @@ services:
   celery:
     build: .
     container_name: celery
-    command: celery -A app.celery_app.celery_app worker --loglevel=info -Q chat
+    command: celery -A app.celery_app.celery_app worker --loglevel=info -Q chat --concurrency=4
     depends_on:
       - redis
     env_file:
