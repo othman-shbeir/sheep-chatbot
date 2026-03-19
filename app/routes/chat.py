@@ -1,3 +1,8 @@
+"""Chat blueprint – REST and SSE endpoints for the Sheep Chatbot.
+
+All routes are mounted under ``/api/v1/chat`` by the application factory.
+"""
+
 import math
 from flask import Blueprint, Response, jsonify, render_template, request
 from celery.result import AsyncResult
@@ -9,7 +14,7 @@ from app.services.agent import (
     run_agent,
     run_agent_stream,
 )
-from app.utils import format_sse
+from app.utils import format_sse, register_task, task_exists
 from app.tasks.chat_tasks import process_chat_message
 from app.logger import setup_logger
 
@@ -24,9 +29,16 @@ def health():
     ---
     tags:
       - Health
+    summary: Service health check
+    description: >
+      Returns a simple JSON payload confirming the API is reachable and
+      operational.  Use this endpoint for liveness probes in container
+      orchestrators (e.g. Kubernetes, Docker Compose health checks).
+    produces:
+      - application/json
     responses:
       200:
-        description: API is running.
+        description: The API is healthy and accepting requests.
         schema:
           type: object
           properties:
@@ -53,6 +65,12 @@ def ui():
     ---
     tags:
       - UI
+    summary: Chatbot web interface
+    description: >
+      Renders the built-in HTML chat interface.  This page communicates with
+      the ``/stream`` endpoint via Server-Sent Events for real-time responses.
+    produces:
+      - text/html
     responses:
       200:
         description: Returns the HTML chat interface.
@@ -62,10 +80,20 @@ def ui():
 
 @chat_bp.route("/one-shot", methods=["POST"])
 def one_shot():
-    """Send a one-shot (non-streaming) chat message.
+    """Submit a one-shot (non-streaming) chat message.
     ---
     tags:
       - Chat
+    summary: Queue a chat message for asynchronous processing
+    description: >
+      Accepts a user message and dispatches it to a Celery worker for
+      processing.  The response contains a ``task_id`` that can be polled
+      via the ``/tasks/{task_id}`` endpoint to retrieve the result once
+      the worker has finished.
+    consumes:
+      - application/json
+    produces:
+      - application/json
     parameters:
       - in: body
         name: body
@@ -83,15 +111,17 @@ def one_shot():
               example: "What breeds of sheep are best for wool?"
             thread_id:
               type: string
-              description: The conversation thread ID.
+              description: >
+                UUID identifying the conversation thread.  All messages
+                sharing the same thread_id belong to one conversation.
               example: "thread-abc-123"
             user_id:
               type: string
-              description: The user's unique ID.
+              description: UUID of the authenticated user.
               example: "user-001"
     responses:
       202:
-        description: Message accepted and queued for processing.
+        description: Message accepted and queued for background processing.
         schema:
           type: object
           properties:
@@ -106,6 +136,7 @@ def one_shot():
               properties:
                 task_id:
                   type: string
+                  description: Celery task ID used to poll for results.
                 thread_id:
                   type: string
                 user_id:
@@ -113,10 +144,39 @@ def one_shot():
                 state:
                   type: string
                   example: PENDING
+                  description: Initial task state.
       400:
-        description: Missing required field.
+        description: >
+          A required field (``message``, ``thread_id``, or ``user_id``)
+          is missing or empty.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: error
+            message:
+              type: string
+              example: "The 'message' field is required."
+            data:
+              type: string
+              example: null
       500:
-        description: Unexpected server error.
+        description: An unexpected server-side error occurred.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: error
+            message:
+              type: string
+              example: An unexpected error occurred.
+            data:
+              type: object
+              properties:
+                details:
+                  type: string
     """
     try:
         data = request.get_json(force=True)
@@ -157,6 +217,8 @@ def one_shot():
             queue="chat",
         )
 
+        register_task(task.id)
+
         return jsonify(
             {
                 "status": "accepted",
@@ -189,24 +251,35 @@ def one_shot():
 
 @chat_bp.route("/tasks/<task_id>", methods=["GET"])
 def task_status(task_id):
-    """Get the status of a queued chat task.
+    """Poll the status of an asynchronous chat task.
     ---
     tags:
       - Tasks
+    summary: Retrieve task status by ID
+    description: >
+      Returns the current state of a Celery task that was created via the
+      ``/one-shot`` endpoint.  Clients should poll this endpoint until the
+      state reaches ``SUCCESS`` or ``FAILURE``.
+
+      A ``404`` is returned if the ``task_id`` was never registered by this
+      application (i.e. it is unknown or has expired from the task registry).
+    produces:
+      - application/json
     parameters:
       - name: task_id
         in: path
         type: string
         required: true
-        description: The Celery task ID returned by the one-shot endpoint.
+        description: The Celery task ID returned by the ``/one-shot`` endpoint.
     responses:
       200:
-        description: Task status retrieved.
+        description: Task status retrieved successfully.
         schema:
           type: object
           properties:
             status:
               type: string
+              example: success
             message:
               type: string
             data:
@@ -216,12 +289,57 @@ def task_status(task_id):
                   type: string
                 state:
                   type: string
+                  description: >
+                    Celery task state – one of PENDING, STARTED, SUCCESS,
+                    or FAILURE.
                 result:
                   type: object
+                  description: Present only when the task has completed successfully.
+      404:
+        description: >
+          The task ID is not recognised.  It may never have been created or
+          its registration has expired.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: error
+            message:
+              type: string
+              example: Task not found.
+            data:
+              type: string
+              example: null
       500:
-        description: Task failed or server error.
+        description: The task failed or the server encountered an error.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: error
+            message:
+              type: string
+            data:
+              type: object
+              properties:
+                task_id:
+                  type: string
+                state:
+                  type: string
+                error:
+                  type: string
     """
     try:
+        if not task_exists(task_id):
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Task not found.",
+                    "data": None,
+                }
+            ), 404
         result = AsyncResult(task_id, app=celery_app)
         state = result.state
 
@@ -273,10 +391,23 @@ def task_status(task_id):
 
 @chat_bp.route("/stream", methods=["POST"])
 def stream():
-    """Send a streaming chat message (Server-Sent Events).
+    """Stream a chat response via Server-Sent Events (SSE).
     ---
     tags:
       - Chat
+    summary: Real-time streaming chat response
+    description: >
+      Accepts a user message and returns a streaming response using the
+      SSE protocol.  Each chunk is sent as a ``delta`` event containing a
+      fragment of the assistant's reply.  When the full response has been
+      emitted a ``done`` event is sent with the complete assistant message
+      and thread metadata.
+
+      If an error occurs mid-stream an ``error`` event is emitted.
+    consumes:
+      - application/json
+    produces:
+      - text/event-stream
     parameters:
       - in: body
         name: body
@@ -294,19 +425,50 @@ def stream():
               example: "Tell me about sheep farming."
             thread_id:
               type: string
-              description: The conversation thread ID.
+              description: UUID identifying the conversation thread.
               example: "thread-abc-123"
             user_id:
               type: string
-              description: The user's unique ID.
+              description: UUID of the authenticated user.
               example: "user-001"
     responses:
       200:
-        description: SSE stream of chat deltas followed by a done event.
+        description: >
+          SSE stream.  Events emitted:
+
+          - ``delta`` – ``{"delta": "<text fragment>"}``
+
+          - ``done``  – ``{"thread_id": "...", "assistant_message": "..."}``
+
+          - ``error`` – ``{"message": "..."}``
       400:
-        description: Missing required field.
+        description: A required field is missing or empty.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: error
+            message:
+              type: string
+            data:
+              type: string
+              example: null
       500:
-        description: Unexpected server error.
+        description: An unexpected server-side error occurred before streaming began.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: error
+            message:
+              type: string
+            data:
+              type: object
+              properties:
+                details:
+                  type: string
     """
     try:
         data = request.get_json(force=True)
@@ -385,28 +547,37 @@ def stream():
 
 @chat_bp.route("/threads", methods=["GET"])
 def threads():
-    """Get all threads for a user (paginated).
+    """List all conversation threads for a user (paginated).
     ---
     tags:
       - Threads
+    summary: Retrieve paginated threads
+    description: >
+      Returns a paginated list of conversation threads that belong to the
+      specified user.  Results are ordered by most-recently active first.
+    produces:
+      - application/json
     parameters:
       - name: user_id
         in: query
         type: string
         required: true
-        description: The user's unique ID.
+        description: UUID of the authenticated user.
       - name: page
         in: query
         type: integer
         required: false
         default: 1
+        minimum: 1
         description: Page number (1-indexed).
       - name: per_page
         in: query
         type: integer
         required: false
         default: 20
-        description: Number of items per page (offset).
+        minimum: 1
+        maximum: 100
+        description: Number of threads to return per page.
     responses:
       200:
         description: Threads fetched successfully.
@@ -414,27 +585,57 @@ def threads():
           type: object
           properties:
             status:
-              type: string
-              example: "success"
+              type: boolean
+              example: true
             message:
               type: string
+              example: Threads fetched successfully.
             data:
               type: array
+              description: List of thread objects.
               items:
                 type: object
             metaData:
               type: object
+              description: Pagination metadata.
               properties:
                 pagesCount:
                   type: integer
+                  description: Total number of pages.
                 currentPage:
                   type: integer
+                  description: The current page number.
                 offset:
                   type: integer
+                  description: Number of items per page (per_page value).
       400:
-        description: Missing user_id query parameter.
+        description: The ``user_id`` query parameter is missing.
+        schema:
+          type: object
+          properties:
+            status:
+              type: boolean
+              example: false
+            message:
+              type: string
+              example: "The 'user_id' query parameter is required."
+            data:
+              type: string
+              example: null
       500:
-        description: Server error.
+        description: Server error while fetching threads.
+        schema:
+          type: object
+          properties:
+            status:
+              type: boolean
+              example: false
+            message:
+              type: string
+              example: Failed to fetch threads.
+            data:
+              type: string
+              example: null
     """
     try:
         user_id = request.args.get("user_id", "").strip()
@@ -473,33 +674,44 @@ def threads():
 
 @chat_bp.route("/threads/<thread_id>/history", methods=["GET"])
 def thread_history(thread_id):
-    """Get the message history for a specific thread (paginated).
+    """Retrieve the message history for a specific thread (paginated).
     ---
     tags:
       - Threads
+    summary: Get thread message history
+    description: >
+      Returns a paginated list of messages within a conversation thread.
+      The caller must supply both the ``thread_id`` (path) and ``user_id``
+      (query) so that the server can verify ownership before revealing
+      any messages.
+    produces:
+      - application/json
     parameters:
       - name: thread_id
         in: path
         type: string
         required: true
-        description: The conversation thread ID.
+        description: UUID of the conversation thread.
       - name: user_id
         in: query
         type: string
         required: true
-        description: The user's unique ID.
+        description: UUID of the authenticated user.
       - name: page
         in: query
         type: integer
         required: false
         default: 1
+        minimum: 1
         description: Page number (1-indexed).
       - name: per_page
         in: query
         type: integer
         required: false
         default: 20
-        description: Number of items per page (offset).
+        minimum: 1
+        maximum: 100
+        description: Number of messages to return per page.
     responses:
       200:
         description: Thread history fetched successfully.
@@ -508,28 +720,88 @@ def thread_history(thread_id):
           properties:
             status:
               type: string
-              example: "success"
+              example: success
             message:
               type: string
+              example: Thread history fetched successfully.
             data:
               type: array
+              description: List of message objects.
               items:
                 type: object
+                properties:
+                  id:
+                    type: string
+                    description: Message UUID.
+                  role:
+                    type: string
+                    description: "Message role: ``human`` or ``ai``."
+                  content:
+                    type: string
+                    description: Message body text.
+                  message_order:
+                    type: integer
+                    description: Ordering index within the thread.
+                  created_at:
+                    type: string
+                    format: date-time
+                    description: ISO-8601 timestamp.
             metaData:
               type: object
+              description: Pagination metadata.
               properties:
                 pagesCount:
                   type: integer
+                  description: Total number of pages.
                 currentPage:
                   type: integer
+                  description: The current page number.
                 offset:
                   type: integer
+                  description: Number of items per page (per_page value).
       400:
-        description: Missing user_id or bad request.
+        description: Missing ``user_id`` or invalid request parameters.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: error
+            message:
+              type: string
+            data:
+              type: string
+              example: null
       404:
-        description: Thread not found.
+        description: >
+          The thread does not exist or does not belong to the specified
+          user.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: error
+            message:
+              type: string
+              example: Thread not found.
+            data:
+              type: string
+              example: null
       500:
-        description: Server error.
+        description: Server error while fetching thread history.
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: error
+            message:
+              type: string
+              example: Failed to fetch thread history.
+            data:
+              type: string
+              example: null
     """
     try:
         user_id = request.args.get("user_id", "").strip()
