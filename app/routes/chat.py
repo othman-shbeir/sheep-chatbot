@@ -10,7 +10,9 @@ from app.services.agent import (
 )
 from app.utils import format_sse
 from app.tasks.chat_tasks import process_chat_message
+from app.logger import setup_logger
 
+logger = setup_logger(__name__)
 
 chat_bp = Blueprint("chat",__name__)
 
@@ -36,8 +38,7 @@ def chat():
 
         message = str(data.get("message", "")).strip()
         thread_id = str(data.get("thread_id", "")).strip()
-        user_email = str(data.get("user_email", "")).strip()
-        user_name = data.get("user_name")
+        user_id = str(data.get("user_id", "")).strip()
 
         if not message:
             return jsonify({
@@ -53,19 +54,20 @@ def chat():
                 "data": None,
             }), 400
 
-        if not user_email:
+        if not user_id:
             return jsonify({
                 "status": "error",
-                "message": "The 'user_email' field is required.",
+                "message": "The 'user_id' field is required.",
                 "data": None,
             }), 400
+
+        logger.info(f"Received /chat request from User ID {user_id} for Thread ID {thread_id}")
 
         task = process_chat_message.apply_async(
             kwargs={
                 "user_input": message,
                 "thread_id": thread_id,
-                "user_email": user_email,
-                "user_name": user_name,
+                "user_id": user_id,
             },
             queue="chat",
         )
@@ -77,7 +79,7 @@ def chat():
                 "data": {
                     "task_id": task.id,
                     "thread_id": thread_id,
-                    "user_email": user_email,
+                    "user_id": user_id,
                     "state": "PENDING",
                 },
             }
@@ -91,6 +93,7 @@ def chat():
         }), 400
 
     except Exception as e:
+        logger.error(f"Unexpected error in /chat endpoint: {e}", exc_info=True)
         return jsonify({
             "status": "error",
             "message": "An unexpected error occurred.",
@@ -158,8 +161,7 @@ def chat_stream():
 
         message = str(data.get("message", "")).strip()
         thread_id = str(data.get("thread_id", "")).strip()
-        user_email = str(data.get("user_email", "")).strip()
-        user_name = data.get("user_name")
+        user_id = str(data.get("user_id", "")).strip()
 
         if not message:
             return jsonify({
@@ -175,12 +177,14 @@ def chat_stream():
                 "data": None,
             }), 400
 
-        if not user_email:
+        if not user_id:
             return jsonify({
                 "status": "error",
-                "message": "The 'user_email' field is required.",
+                "message": "The 'user_id' field is required.",
                 "data": None,
             }), 400
+
+        logger.info(f"Received /chat/stream request from User ID {user_id} for Thread ID {thread_id}")
 
         def generate():
             assistant_parts: list[str] = []
@@ -188,8 +192,7 @@ def chat_stream():
                 for delta in run_agent_stream(
                     user_input=message,
                     thread_id=thread_id,
-                    user_email=user_email,
-                    user_name=user_name,
+                    user_id=user_id,
                 ):
                     assistant_parts.append(delta)
                     yield format_sse("delta", {"delta": delta})
@@ -218,6 +221,7 @@ def chat_stream():
         }), 400
 
     except Exception as e:
+        logger.error(f"Unexpected error in /chat/stream endpoint: {e}", exc_info=True)
         return jsonify({
             "status": "error",
             "message": "An unexpected error occurred.",
@@ -230,16 +234,16 @@ def chat_stream():
 @chat_bp.route("/threads", methods=["GET"])
 def threads():
     try:
-        user_email = request.args.get("user_email", "").strip()
+        user_id = request.args.get("user_id", "").strip()
 
-        if not user_email:
+        if not user_id:
             return jsonify({
                 "status": "error",
-                "message": "The 'user_email' query parameter is required.",
+                "message": "The 'user_id' query parameter is required.",
                 "data": None,
             }), 400
 
-        threads_data = get_all_threads(user_email)
+        threads_data = get_all_threads(user_id)
 
         return jsonify({
             "status": "success",

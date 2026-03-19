@@ -11,9 +11,12 @@ from app.db import (
     get_latest_summary,
     get_messages_after_summary,
     get_or_create_thread,
-    get_or_create_user,
+    get_user_by_id,
 )
 from app.utils import extract_text_content
+from app.logger import setup_logger
+
+logger = setup_logger(__name__)
 
 SYSTEM_PROMPT = """
 You are a helpful, warm, and knowledgeable AI assistant.
@@ -172,13 +175,12 @@ def maybe_compact_thread(thread_id: str, summary_trigger_count: int = 20, keep_r
 def run_agent(
     user_input: str,
     thread_id: str,
-    user_email: str,
-    user_name: str | None = None,
+    user_id: str,
 ) -> str:
     require_database()
     thread_id = thread_id.strip()
     user_input = user_input.strip()
-    user_email = user_email.strip().lower()
+    user_id = user_id.strip()
 
     if not thread_id:
         raise ValueError("thread_id is required.")
@@ -186,11 +188,22 @@ def run_agent(
     if not user_input:
         raise ValueError("user_input is required.")
 
-    if not user_email:
-        raise ValueError("user_email is required.")
+    if not user_id:
+        raise ValueError("user_id is required.")
+
+    import uuid
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError as e:
+        raise ValueError("user_id must be a valid UUID.") from e
 
     with SessionLocal() as session:
-        user = get_or_create_user(session, email=user_email, name=user_name)
+        user = get_user_by_id(session, user_uuid)
+        if not user:
+            logger.warning(f"run_agent failed: User ID {user_uuid} not found")
+            raise ValueError("User not found.")
+
+        logger.info(f"Loaded User {user_uuid} from DB for run_agent")
 
         title = user_input[:60]
         if len(user_input) > 60:
@@ -233,13 +246,12 @@ def run_agent(
 def run_agent_stream(
     user_input: str,
     thread_id: str,
-    user_email: str,
-    user_name: str | None = None,
+    user_id: str,
 ):
     require_database()
     thread_id = (thread_id or "").strip()
     user_input = (user_input or "").strip()
-    user_email = (user_email or "").strip().lower()
+    user_id = (user_id or "").strip()
 
     if not thread_id:
         raise ValueError("thread_id is required.")
@@ -247,11 +259,22 @@ def run_agent_stream(
     if not user_input:
         raise ValueError("user_input is required.")
 
-    if not user_email:
-        raise ValueError("user_email is required.")
+    if not user_id:
+        raise ValueError("user_id is required.")
+
+    import uuid
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError as e:
+        raise ValueError("user_id must be a valid UUID.") from e
 
     with SessionLocal() as session:
-        user = get_or_create_user(session, email=user_email, name=user_name)
+        user = get_user_by_id(session, user_uuid)
+        if not user:
+            logger.warning(f"run_agent_stream failed: User ID {user_uuid} not found")
+            raise ValueError("User not found.")
+
+        logger.info(f"Loaded User {user_uuid} from DB for run_agent_stream")
 
         title = user_input[:60]
         if len(user_input) > 60:

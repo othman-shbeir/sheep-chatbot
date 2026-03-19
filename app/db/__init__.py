@@ -1,7 +1,7 @@
 from .database import Base, engine, SessionLocal, get_db
 from .models import User, Thread, ThreadMessage, ThreadSummary
 from .repository import (
-    get_or_create_user,
+    get_user_by_id,
     get_or_create_thread,
     get_next_message_order,
     add_message,
@@ -23,7 +23,7 @@ __all__ = [
     "Thread",
     "ThreadMessage",
     "ThreadSummary",
-    "get_or_create_user",
+    "get_user_by_id",
     "get_or_create_thread",
     "get_next_message_order",
     "add_message",

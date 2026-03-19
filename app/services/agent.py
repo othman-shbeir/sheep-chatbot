@@ -3,11 +3,19 @@ from app.agents.agent import require_database, run_agent, run_agent_stream
 from app.db import SessionLocal, get_thread_messages_for_user, get_threads_for_user, thread_belongs_to_user
 
 
-def get_all_threads(user_email: str) -> list[dict]:
+def get_all_threads(user_id: str) -> list[dict]:
     require_database()
-    user_email = user_email.strip().lower()
+    user_id = (user_id or "").strip()
+    if not user_id:
+        raise ValueError("user_id is required.")
+
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError as e:
+        raise ValueError("user_id must be a valid UUID.") from e
+
     with SessionLocal() as session:
-        return get_threads_for_user(session, user_email)
+        return get_threads_for_user(session, user_uuid)
 
 
 class ThreadNotFoundError(Exception):

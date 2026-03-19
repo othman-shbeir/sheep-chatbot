@@ -11,21 +11,10 @@ def utc_now():
     return datetime.now(timezone.utc)
 
 
-def get_or_create_user(session: Session, email: str, name: str | None = None) -> User:
-    user = session.execute(
-        select(User).where(User.email == email)
+def get_user_by_id(session: Session, user_id: UUID) -> User | None:
+    return session.execute(
+        select(User).where(User.id == user_id)
     ).scalar_one_or_none()
-
-    if user:
-        if name and user.name != name:
-            user.name = name
-        user.updated_at = utc_now()
-        return user
-
-    user = User(email=email, name=name)
-    session.add(user)
-    session.flush()
-    return user
 
 
 def get_or_create_thread(
@@ -160,17 +149,10 @@ def create_summary(
     return summary
 
 
-def get_threads_for_user(session: Session, user_email: str) -> list[dict]:
-    user = session.execute(
-        select(User).where(User.email == user_email)
-    ).scalar_one_or_none()
-
-    if not user:
-        return []
-
+def get_threads_for_user(session: Session, user_id: UUID) -> list[dict]:
     threads = session.execute(
         select(Thread)
-        .where(Thread.user_id == user.id)
+        .where(Thread.user_id == user_id)
         .order_by(Thread.last_message_at.desc(), Thread.created_at.desc())
     ).scalars().all()
 
