@@ -174,7 +174,7 @@ async function sendMessage() {
 
     try {
         if (!useStreaming) {
-            const response = await fetch('/chat', {
+            const response = await fetch('/api/v1/chat/one-shot', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message: text, thread_id: currentThreadId, user_email: userEmail })
@@ -193,7 +193,7 @@ async function sendMessage() {
         }
 
         // Streaming mode (SSE)
-        const response = await fetch('/chat/stream', {
+        const response = await fetch('/api/v1/chat/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: text, thread_id: currentThreadId, user_email: userEmail })
@@ -286,7 +286,7 @@ async function sendMessage() {
 
 async function fetchThreads() {
     try {
-        const res = await fetch('/api/history');
+        const res = await fetch('/api/v1/chat/threads');
         const json = await res.json();
         if (json.status === 'success') {
             // Newest first — the backend returns in insertion order
@@ -327,7 +327,7 @@ async function switchThread(threadId) {
     if (threadId === currentThreadId) return;
 
     try {
-        const res = await fetch(`/api/history/${threadId}`);
+        const res = await fetch(`/api/v1/chat/threads/${threadId}/history`);
         const json = await res.json();
 
         if (json.status === 'success') {

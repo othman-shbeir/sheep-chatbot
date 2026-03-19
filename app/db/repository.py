@@ -117,14 +117,32 @@ def thread_belongs_to_user(session: Session, thread_id: str, user_id: UUID) -> b
     return session.execute(stmt).scalar_one_or_none() is not None
 
 
-def get_thread_messages_for_user(session: Session, thread_id: str, user_id: UUID) -> list[ThreadMessage]:
-    stmt = (
+def get_thread_messages_for_user(
+    session: Session,
+    thread_id: str,
+    user_id: UUID,
+    page: int = 1,
+    per_page: int = 20,
+) -> dict:
+    base = (
         select(ThreadMessage)
         .join(Thread, ThreadMessage.thread_id == Thread.id)
         .where(Thread.id == thread_id, Thread.user_id == user_id)
-        .order_by(ThreadMessage.message_order.asc())
     )
-    return list(session.execute(stmt).scalars().all())
+
+    total = session.execute(
+        select(func.count()).select_from(base.subquery())
+    ).scalar_one()
+
+    items = list(
+        session.execute(
+            base.order_by(ThreadMessage.message_order.asc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        ).scalars().all()
+    )
+
+    return {"items": items, "total": total, "page": page, "per_page": per_page}
 
 
 def create_summary(
@@ -149,14 +167,27 @@ def create_summary(
     return summary
 
 
-def get_threads_for_user(session: Session, user_id: UUID) -> list[dict]:
-    threads = session.execute(
-        select(Thread)
-        .where(Thread.user_id == user_id)
-        .order_by(Thread.last_message_at.desc(), Thread.created_at.desc())
-    ).scalars().all()
+def get_threads_for_user(
+    session: Session,
+    user_id: UUID,
+    page: int = 1,
+    per_page: int = 20,
+) -> dict:
+    base = select(Thread).where(Thread.user_id == user_id)
 
-    return [
+    total = session.execute(
+        select(func.count()).select_from(base.subquery())
+    ).scalar_one()
+
+    threads = list(
+        session.execute(
+            base.order_by(Thread.last_message_at.desc(), Thread.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        ).scalars().all()
+    )
+
+    items = [
         {
             "id": thread.id,
             "title": thread.title,
@@ -167,3 +198,5 @@ def get_threads_for_user(session: Session, user_id: UUID) -> list[dict]:
         }
         for thread in threads
     ]
+
+    return {"items": items, "total": total, "page": page, "per_page": per_page}
