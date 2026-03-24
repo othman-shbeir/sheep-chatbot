@@ -23,13 +23,26 @@ services:
     ports:
       - "6379:6379"
   
-  celery:
+  celery-chat:
     build: .
-    container_name: celery
+    container_name: celery-chat
     command: celery -A app.celery_app.celery_app worker --loglevel=info -Q chat --concurrency=4
     depends_on:
       - redis
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  celery-stream:
+    build: .
+    container_name: celery-stream
+    command: celery -A app.celery_app.celery_app worker --loglevel=info -Q stream
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
