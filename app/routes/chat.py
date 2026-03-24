@@ -4,6 +4,8 @@ All routes are mounted under ``/api/v1/chat`` by the application factory.
 """
 
 import math
+import json
+import uuid
 from flask import Blueprint, Response, jsonify, render_template, request
 from celery.result import AsyncResult
 from app.celery_app import celery_app
@@ -14,8 +16,20 @@ from app.services.agent import (
     run_agent,
     run_agent_stream,
 )
+
+from app.services.stream_service import (
+    get_redis,
+    get_status,
+    get_task_id,
+    publish_event,
+    request_cancel,
+    set_status,
+    set_task_id,
+    stream_key,
+)
 from app.utils import format_sse, register_task, task_exists
 from app.tasks.chat_tasks import process_chat_message
+from app.tasks.chat_stream_task import process_chat_stream
 from app.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -544,6 +558,191 @@ def stream():
             },
         }), 500
 
+
+
+@chat_bp.route("/stream/start", methods=["POST"])
+def chat_stream_start():
+    try:
+        data = request.get_json(force=True)
+
+        message = str(data.get("message", "")).strip()
+        thread_id = str(data.get("thread_id", "")).strip()
+        user_id = str(data.get("user_id", "")).strip()
+        
+
+        if not message:
+            return jsonify({
+                "status": "error",
+                "message": "The 'message' field is required.",
+                "data": None,
+            }), 400
+
+        if not thread_id:
+            return jsonify({
+                "status": "error",
+                "message": "The 'thread_id' field is required.",
+                "data": None,
+            }), 400
+
+        if not user_id:
+            return jsonify({
+                "status": "error",
+                "message": "The 'user_id' field is required.",
+                "data": None,
+            }), 400
+
+        run_id = str(uuid.uuid4())
+
+        set_status(run_id, "PENDING")
+        publish_event(
+            run_id,
+            "queued",
+            {
+                "run_id": run_id,
+                "thread_id": thread_id,
+            },
+        )
+
+        task = process_chat_stream.apply_async(
+            kwargs={
+                "run_id": run_id,
+                "user_input": message,
+                "thread_id": thread_id,
+                "user_id": user_id
+            },
+            queue="stream",
+        )
+
+        set_task_id(run_id, task.id)
+        register_task(
+            task.id
+        )
+
+        return jsonify({
+            "status": "accepted",
+            "message": "Streaming task queued successfully.",
+            "data": {
+                "run_id": run_id,
+                "task_id": task.id,
+                "thread_id": thread_id,
+                "events_url": f"/chat/stream/events/{run_id}",
+                "cancel_url": f"/chat/stream/cancel/{run_id}",
+                "status_url": f"/chat/stream/status/{run_id}",
+                "state": "PENDING",
+            },
+        }), 202
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to start streaming task.",
+            "data": {"details": str(e)},
+        }), 500
+
+
+@chat_bp.route("/stream/events/<run_id>", methods=["GET"])
+def chat_stream_events(run_id):
+    redis = get_redis()
+    key = stream_key(run_id)
+
+    last_event_id = request.headers.get("Last-Event-ID", "").strip()
+    if not last_event_id:
+        last_event_id = request.args.get("last_event_id", "0-0").strip() or "0-0"
+
+    def generate():
+        current_id = last_event_id
+        yield ": connected\n\n"
+
+        while True:
+            events = redis.xread({key: current_id}, block=30000, count=20)
+
+            if not events:
+                yield ": keepalive\n\n"
+                continue
+
+            for _, messages in events:
+                for msg_id, msg_data in messages:
+                    current_id = msg_id
+                    event_type = msg_data.get("type", "message")
+                    payload = json.loads(msg_data.get("data", "{}"))
+
+                    yield (
+                        f"id: {msg_id}\n"
+                        f"event: {event_type}\n"
+                        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    )
+
+                    if event_type in {"done", "error", "cancelled"}:
+                        return
+
+    response = Response(generate(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+@chat_bp.route("/stream/cancel/<run_id>", methods=["POST"])
+def chat_stream_cancel(run_id):
+    try:
+        request_cancel(run_id)
+        set_status(run_id, "CANCELLING")
+
+        task_id = get_task_id(run_id)
+        if task_id:
+            celery_app.control.revoke(task_id, terminate=False)
+
+        publish_event(
+            run_id,
+            "cancelling",
+            {
+                "run_id": run_id,
+            },
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Cancellation requested.",
+            "data": {
+                "run_id": run_id,
+                "state": "CANCELLING",
+            },
+        }), 202
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to request cancellation.",
+            "data": {"details": str(e)},
+        }), 500
+
+
+@chat_bp.route("/stream/status/<run_id>", methods=["GET"])
+def chat_stream_status(run_id):
+    try:
+        state = get_status(run_id)
+
+        if not state:
+            return jsonify({
+                "status": "error",
+                "message": "Run not found.",
+                "data": None,
+            }), 404
+
+        return jsonify({
+            "status": "success",
+            "message": "Run status fetched successfully.",
+            "data": {
+                "run_id": run_id,
+                "state": state,
+            },
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to fetch run status.",
+            "data": {"details": str(e)},
+        }), 500
 
 @chat_bp.route("/threads", methods=["GET"])
 def threads():

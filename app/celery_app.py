@@ -1,6 +1,7 @@
 from celery import Celery
+from kombu import Queue
 
-from app.config import Config
+from app.config.config import Config
 
 
 def create_celery_app() -> Celery:
@@ -10,6 +11,7 @@ def create_celery_app() -> Celery:
         backend=Config.CELERY_RESULT_BACKEND,
         include=[
             "app.tasks.chat_tasks",
+            "app.tasks.chat_stream_task",
         ],
     )
 
@@ -22,6 +24,14 @@ def create_celery_app() -> Celery:
         timezone=Config.CELERY_TIMEZONE,
         enable_utc=Config.CELERY_ENABLE_UTC,
         task_default_queue="chat",
+        task_queues=(
+            Queue("chat"),
+            Queue("stream"),
+        ),
+        task_routes={
+            "app.tasks.chat_tasks.process_chat_message": {"queue": "chat"},
+            "app.tasks.chat_stream_task.process_chat_stream": {"queue": "stream"},
+        },
     )
 
     return celery_app
