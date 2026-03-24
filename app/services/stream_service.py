@@ -1,11 +1,26 @@
 import json
-from redis import Redis
+from redis import Redis, ConnectionPool
 
 from app.config.config import Config
 
+_redis_pool: ConnectionPool | None = None
+_redis_client: Redis | None = None
+
 
 def get_redis() -> Redis:
-    return Redis.from_url(Config.REDIS_URL, decode_responses=True)
+    global _redis_pool, _redis_client
+
+    if _redis_client is None:
+        if _redis_pool is None:
+            _redis_pool = ConnectionPool.from_url(
+                Config.REDIS_URL,
+                decode_responses=True,
+                max_connections=35, 
+            )
+
+        _redis_client = Redis(connection_pool=_redis_pool)
+
+    return _redis_client
 
 
 def stream_key(run_id: str) -> str:
