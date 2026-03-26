@@ -19,4 +19,4 @@ COPY . .
 EXPOSE 5000
 
 # Run the application using Gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "app:create_app()"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--threads", "4", "app:create_app()"]

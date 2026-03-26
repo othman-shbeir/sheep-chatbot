@@ -23,14 +23,46 @@ services:
       - "6379:6379"
     restart: unless-stopped
   
-  celery:
+  celery-chat:
     build: .
-    container_name: celery
-    command: celery -A app.celery_app.celery_app worker --loglevel=info -Q chat --concurrency=4
+    container_name: celery-chat
+    command: celery -A app.celery_app.celery_app worker --loglevel=info -Q chat --concurrency=4 -E
     depends_on:
       - redis
     env_file:
       - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+
+  celery-stream:
+    build: .
+    container_name: celery-stream
+    command: celery -A app.celery_app.celery_app worker --loglevel=info -Q stream --concurrency=4 -E
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  flower:
+    build: .
+    container_name: flower
+    command: celery -A app.celery_app.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      - redis
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

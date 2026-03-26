@@ -66,3 +66,8 @@ class Config:
     CELERY_ACCEPT_CONTENT: str = os.getenv("CELERY_ACCEPT_CONTENT", "json")
     CELERY_TIMEZONE: str = os.getenv("CELERY_TIMEZONE", "UTC")
     CELERY_ENABLE_UTC: bool = os.getenv("CELERY_ENABLE_UTC", "true").lower() == "true"
+    
+    TASK_REGISTRY_TTL_SECONDS = int(os.getenv("TASK_REGISTRY_TTL_SECONDS", 600))
+
+    STREAM_MAXLEN = int(os.getenv("STREAM_MAXLEN", 1000))
+    STREAM_TTL_SECONDS = int(os.getenv("STREAM_TTL_SECONDS", 3600))
