@@ -16,3 +16,4 @@ redis
 celery
 gunicorn
 flasgger
+flower

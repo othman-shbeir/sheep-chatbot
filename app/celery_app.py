@@ -9,6 +9,7 @@ def create_celery_app() -> Celery:
         "sheep_chatbot",
         broker=Config.CELERY_BROKER_URL,
         backend=Config.CELERY_RESULT_BACKEND,
+        result_backend_thread_safe=True,
         include=[
             "app.tasks.chat_tasks",
             "app.tasks.chat_stream_task",
