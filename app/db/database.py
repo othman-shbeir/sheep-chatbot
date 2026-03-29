@@ -1,7 +1,9 @@
+"""SQLAlchemy engine, metadata base, and session helpers."""
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
-from app.config import Config
 
+from app.config import Config
 
 DATABASE_URL = Config.DATABASE_URL
 
@@ -26,15 +28,20 @@ SessionLocal = sessionmaker(
 
 
 def get_db():
+    """Yield a database session for request-scoped work."""
     if engine is None:
         raise ValueError("DATABASE_URL is not set in the environment.")
+
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
+
 def init_db():
+    """Create database tables for the configured metadata base."""
     if engine is None:
         raise ValueError("DATABASE_URL is not set in the environment.")
+
     Base.metadata.create_all(bind=engine)

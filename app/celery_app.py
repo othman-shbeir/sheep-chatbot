@@ -1,3 +1,5 @@
+"""Celery application factory and queue configuration."""
+
 from celery import Celery
 from kombu import Queue
 
@@ -5,6 +7,7 @@ from app.config.config import Config
 
 
 def create_celery_app() -> Celery:
+    """Create the shared Celery application used by workers and routes."""
     celery_app = Celery(
         "sheep_chatbot",
         broker=Config.CELERY_BROKER_URL,

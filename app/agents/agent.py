@@ -13,7 +13,7 @@ from app.db import (
     get_or_create_thread,
     get_user_by_id,
 )
-from app.utils import extract_text_content
+from app.utils import extract_stream_text_content, extract_text_content
 from app.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -299,7 +299,7 @@ def run_agent_stream(
 
     assistant_parts: list[str] = []
     for chunk in get_model_with_search().stream(context_messages):
-        delta = extract_text_content(chunk)
+        delta = extract_stream_text_content(chunk)
         if not delta:
             continue
         assistant_parts.append(delta)

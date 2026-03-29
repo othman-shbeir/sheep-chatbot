@@ -1,3 +1,5 @@
+"""Flask application factory and Swagger configuration."""
+
 from flask import Flask, jsonify
 from flasgger import Swagger
 
@@ -33,6 +35,7 @@ SWAGGER_CONFIG = {
 
 
 def create_app():
+    """Create and configure the Flask application instance."""
     app = Flask(
         __name__,
         template_folder="templates",

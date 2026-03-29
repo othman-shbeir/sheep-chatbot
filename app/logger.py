@@ -1,7 +1,11 @@
+"""Shared logger configuration for the application."""
+
 import logging
 import sys
 
+
 def setup_logger(name: str) -> logging.Logger:
+    """Return a stdout logger with a consistent formatter and level."""
     logger = logging.getLogger(name)
     if not logger.handlers:
         logger.setLevel(logging.INFO)

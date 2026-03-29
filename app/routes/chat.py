@@ -1,4 +1,4 @@
-"""Chat blueprint – REST and SSE endpoints for the Sheep Chatbot.
+"""Chat blueprint for REST and SSE endpoints exposed by the API.
 
 All routes are mounted under ``/api/v1/chat`` by the application factory.
 """
@@ -6,14 +6,13 @@ All routes are mounted under ``/api/v1/chat`` by the application factory.
 import math
 import json
 import uuid
-from flask import Blueprint, Response, jsonify, render_template, request
+from flask import Blueprint, Response, jsonify, render_template, request, url_for
 from celery.result import AsyncResult
 from app.celery_app import celery_app
 from app.services.agent import (
     ThreadNotFoundError,
     get_all_threads,
     get_thread_history,
-    run_agent,
     run_agent_stream,
 )
 
@@ -304,7 +303,7 @@ def task_status(task_id):
                 state:
                   type: string
                   description: >
-                    Celery task state – one of PENDING, STARTED, SUCCESS,
+                    Celery task state - one of PENDING, STARTED, SUCCESS,
                     or FAILURE.
                 result:
                   type: object
@@ -450,11 +449,11 @@ def stream():
         description: >
           SSE stream.  Events emitted:
 
-          - ``delta`` – ``{"delta": "<text fragment>"}``
+          - ``delta`` - ``{"delta": "<text fragment>"}``
 
-          - ``done``  – ``{"thread_id": "...", "assistant_message": "..."}``
+          - ``done``  - ``{"thread_id": "...", "assistant_message": "..."}``
 
-          - ``error`` – ``{"message": "..."}``
+          - ``error`` - ``{"message": "..."}``
       400:
         description: A required field is missing or empty.
         schema:
@@ -562,6 +561,47 @@ def stream():
 
 @chat_bp.route("/stream/start", methods=["POST"])
 def chat_stream_start():
+    """Create an asynchronous streaming chat run.
+    ---
+    tags:
+      - Stream
+    summary: Start a streaming chat task
+    description: >
+      Queues a streaming chat task and returns the identifiers and follow-up
+      endpoints required to receive events, poll status, or request
+      cancellation.
+    consumes:
+      - application/json
+    produces:
+      - application/json
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - message
+            - thread_id
+            - user_id
+          properties:
+            message:
+              type: string
+              example: "Tell me about sheep nutrition."
+            thread_id:
+              type: string
+              example: "thread-abc-123"
+            user_id:
+              type: string
+              example: "user-001"
+    responses:
+      202:
+        description: Streaming task accepted and queued.
+      400:
+        description: A required field is missing or empty.
+      500:
+        description: The server failed to create the streaming task.
+    """
     try:
         data = request.get_json(force=True)
 
@@ -625,9 +665,9 @@ def chat_stream_start():
                 "run_id": run_id,
                 "task_id": task.id,
                 "thread_id": thread_id,
-                "events_url": f"/chat/stream/events/{run_id}",
-                "cancel_url": f"/chat/stream/cancel/{run_id}",
-                "status_url": f"/chat/stream/status/{run_id}",
+                "events_url": url_for("chat.chat_stream_events", run_id=run_id),
+                "cancel_url": url_for("chat.chat_stream_cancel", run_id=run_id),
+                "status_url": url_for("chat.chat_stream_status", run_id=run_id),
                 "state": "PENDING",
             },
         }), 202
@@ -642,6 +682,34 @@ def chat_stream_start():
 
 @chat_bp.route("/stream/events/<run_id>", methods=["GET"])
 def chat_stream_events(run_id):
+    """Stream Redis-backed SSE events for a queued streaming run.
+    ---
+    tags:
+      - Stream
+    summary: Consume streaming chat events
+    description: >
+      Opens a Server-Sent Events stream for the specified run. Clients can
+      reconnect by sending ``Last-Event-ID`` or the ``last_event_id`` query
+      parameter to resume from the last processed event.
+    produces:
+      - text/event-stream
+    parameters:
+      - name: run_id
+        in: path
+        type: string
+        required: true
+        description: Streaming run identifier returned by ``/stream/start``.
+      - name: last_event_id
+        in: query
+        type: string
+        required: false
+        description: >
+          Optional Redis stream event ID to resume from when the
+          ``Last-Event-ID`` header is not supplied.
+    responses:
+      200:
+        description: SSE stream established successfully.
+    """
     redis = get_redis()
     key = stream_key(run_id)
 
@@ -683,6 +751,25 @@ def chat_stream_events(run_id):
 
 @chat_bp.route("/stream/cancel/<run_id>", methods=["POST"])
 def chat_stream_cancel(run_id):
+    """Request cancellation of a queued or running stream.
+    ---
+    tags:
+      - Stream
+    summary: Cancel a streaming chat task
+    produces:
+      - application/json
+    parameters:
+      - name: run_id
+        in: path
+        type: string
+        required: true
+        description: Streaming run identifier returned by ``/stream/start``.
+    responses:
+      202:
+        description: Cancellation request accepted.
+      500:
+        description: The server failed to record the cancellation request.
+    """
     try:
         request_cancel(run_id)
         set_status(run_id, "CANCELLING")
@@ -718,6 +805,27 @@ def chat_stream_cancel(run_id):
 
 @chat_bp.route("/stream/status/<run_id>", methods=["GET"])
 def chat_stream_status(run_id):
+    """Return the current lifecycle state of a streaming run.
+    ---
+    tags:
+      - Stream
+    summary: Fetch streaming run status
+    produces:
+      - application/json
+    parameters:
+      - name: run_id
+        in: path
+        type: string
+        required: true
+        description: Streaming run identifier returned by ``/stream/start``.
+    responses:
+      200:
+        description: Run status fetched successfully.
+      404:
+        description: The run identifier is not known or has expired.
+      500:
+        description: The server failed to fetch the run status.
+    """
     try:
         state = get_status(run_id)
 
@@ -1049,3 +1157,4 @@ def thread_history(thread_id):
             "message": "Failed to fetch thread history.",
             "data": None,
         }), 500
+
