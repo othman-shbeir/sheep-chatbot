@@ -47,6 +47,16 @@ def create_app():
 
     Swagger(app, template=SWAGGER_TEMPLATE, config=SWAGGER_CONFIG)
 
+    @app.route("/", methods=["GET"])
+    def app_health():
+        return jsonify(
+            {
+                "status": "success",
+                "message": "The application works properly.",
+                "data": None,
+            }
+        ), 200
+
     @app.errorhandler(404)
     def not_found(e):
         return jsonify({

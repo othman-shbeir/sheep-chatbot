@@ -11,9 +11,11 @@ from celery.result import AsyncResult
 from app.celery_app import celery_app
 from app.services.agent import (
     ThreadNotFoundError,
+    UserNotFoundError,
     get_all_threads,
     get_thread_history,
     run_agent_stream,
+    validate_user_id,
 )
 
 from app.services.stream_service import (
@@ -44,14 +46,14 @@ def health():
       - Health
     summary: Service health check
     description: >
-      Returns a simple JSON payload confirming the API is reachable and
-      operational.  Use this endpoint for liveness probes in container
-      orchestrators (e.g. Kubernetes, Docker Compose health checks).
+      Returns a simple JSON payload confirming the chat routes are reachable
+      and operating correctly. Use this endpoint for chat-service liveness
+      checks in container orchestrators.
     produces:
       - application/json
     responses:
       200:
-        description: The API is healthy and accepting requests.
+        description: The chat endpoint is healthy and accepting requests.
         schema:
           type: object
           properties:
@@ -60,14 +62,14 @@ def health():
               example: success
             message:
               type: string
-              example: Chatbot API is running.
+              example: Chat endpoint works properly.
             data:
               type: string
               example: null
     """
     return jsonify({
         "status": "success",
-        "message": "Chatbot API is running.",
+        "message": "Chat endpoints works properly.",
         "data": None,
     }), 200
 
@@ -219,6 +221,8 @@ def one_shot():
                 "data": None,
             }), 400
 
+        validate_user_id(user_id)
+
         logger.info(f"Received /one-shot request from User ID {user_id} for Thread ID {thread_id}")
 
         task = process_chat_message.apply_async(
@@ -251,6 +255,13 @@ def one_shot():
             "message": str(e),
             "data": None,
         }), 400
+
+    except UserNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": "User not found.",
+            "data": None,
+        }), 404
 
     except Exception as e:
         logger.error(f"Unexpected error in /one-shot endpoint: {e}", exc_info=True)
@@ -511,6 +522,8 @@ def stream():
                 "data": None,
             }), 400
 
+        validate_user_id(user_id)
+
         logger.info(f"Received /stream request from User ID {user_id} for Thread ID {thread_id}")
 
         def generate():
@@ -546,6 +559,13 @@ def stream():
             "message": str(e),
             "data": None,
         }), 400
+
+    except UserNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": "User not found.",
+            "data": None,
+        }), 404
 
     except Exception as e:
         logger.error(f"Unexpected error in /stream endpoint: {e}", exc_info=True)
@@ -631,6 +651,8 @@ def chat_stream_start():
                 "data": None,
             }), 400
 
+        validate_user_id(user_id)
+
         run_id = str(uuid.uuid4())
 
         set_status(run_id, "PENDING")
@@ -671,6 +693,20 @@ def chat_stream_start():
                 "state": "PENDING",
             },
         }), 202
+
+    except ValueError as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "data": None,
+        }), 400
+
+    except UserNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": "User not found.",
+            "data": None,
+        }), 404
 
     except Exception as e:
         return jsonify({
@@ -971,6 +1007,20 @@ def threads():
             },
         }), 200
 
+    except ValueError as e:
+        return jsonify({
+            "status": False,
+            "message": str(e),
+            "data": None,
+        }), 400
+
+    except UserNotFoundError:
+        return jsonify({
+            "status": False,
+            "message": "User not found.",
+            "data": None,
+        }), 404
+
     except Exception as e:
         return jsonify({
             "status": False,
@@ -1136,6 +1186,13 @@ def thread_history(thread_id):
                 "offset": per_page,
             },
         }), 200
+
+    except UserNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": "User not found.",
+            "data": None,
+        }), 404
 
     except ThreadNotFoundError:
         return jsonify({
