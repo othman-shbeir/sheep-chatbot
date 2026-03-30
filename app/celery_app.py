@@ -20,6 +20,8 @@ def create_celery_app() -> Celery:
     )
 
     celery_app.conf.update(
+        broker_pool_limit=Config.CELERY_BROKER_POOL_LIMIT,
+        broker_connection_retry_on_startup=True,
         task_track_started=Config.CELERY_TASK_TRACK_STARTED,
         result_expires=Config.CELERY_RESULT_EXPIRES,
         task_serializer=Config.CELERY_TASK_SERIALIZER,
