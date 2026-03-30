@@ -10,18 +10,44 @@ services:
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=true
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://guest:guest@rabbitmq:5672//}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
     env_file:
       - .env
     depends_on:
-      - redis
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER:-guest}
+      - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS:-guest}
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q listeners | grep -q 'port: 5672, protocol: amqp'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
   
   redis:
     image: redis:latest
     container_name: redis
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
   
   celery-chat:
     build: .
@@ -29,11 +55,19 @@ services:
     command: celery -A app.celery_app.celery_app worker --loglevel=info -Q chat --concurrency=4 -E
     volumes:
       - .:/app
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://guest:guest@rabbitmq:5672//}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
     env_file:
       - .env
     depends_on:
-      - redis
-      - web
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
@@ -43,32 +77,48 @@ services:
     command: celery -A app.celery_app.celery_app worker --loglevel=info -Q stream --concurrency=4 -E
     volumes:
       - .:/app
+    environment:
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://guest:guest@rabbitmq:5672//}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
     env_file:
       - .env
     depends_on:
-      - redis
-      - web
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
   flower:
     build: .
     container_name: flower
-    command: celery -A app.celery_app.celery_app --broker=redis://redis:6379/0 flower --port=5555
+    command: celery -A app.celery_app.celery_app flower --port=5555 --broker-api=${FLOWER_BROKER_API:-http://guest:guest@rabbitmq:15672/api/}
     ports:
       - "5555:5555"
     volumes:
       - .:/app
     environment:
-    - CELERY_BROKER_URL=redis://redis:6379/0
-    - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-amqp://guest:guest@rabbitmq:5672//}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/0}
+      - FLOWER_BROKER_API=${FLOWER_BROKER_API:-http://guest:guest@rabbitmq:15672/api/}
     env_file:
       - .env
     depends_on:
-      - redis
-      - web
-      - celery-chat
-      - celery-stream
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      web:
+        condition: service_started
+      celery-chat:
+        condition: service_started
+      celery-stream:
+        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
