@@ -1,78 +1,59 @@
 """Redis-backed helpers for streaming chat runs and SSE event state."""
-
 import json
-import os
+import re
 
-from redis import ConnectionPool, Redis
+from redis import Redis
 
 from app.config.config import Config
-from app.logger import setup_logger
+from app.services.redis_client import get_redis
 
-logger = setup_logger(__name__)
-
-_redis_pool: "LoggingConnectionPool | None" = None
-_redis_client: Redis | None = None
-
-
-class LoggingConnectionPool(ConnectionPool):
-    """Connection pool that logs Redis connection lifecycle events."""
-
-    def __init__(self, *args, **kwargs):
-        self._process_label = f"pid={os.getpid()}"
-        super().__init__(*args, **kwargs)
-
-    def _pool_state(self) -> str:
-        """Return a compact summary of the pool state for debug logging."""
-        available = len(getattr(self, "_available_connections", []))
-        in_use = len(getattr(self, "_in_use_connections", []))
-        created = getattr(self, "_created_connections", "unknown")
-        max_conn = getattr(self, "max_connections", "unknown")
-        return (
-            f"{self._process_label} "
-            f"created={created} in_use={in_use} available={available} max={max_conn}"
-        )
-
-    def get_connection(self, command_name=None, *keys, **options):
-        """Log connection checkout and delegate to the base pool."""
-        conn = super().get_connection(command_name, *keys, **options)
-        logger.debug("[REDIS POOL][ACQUIRE] %s conn=%s", self._pool_state(), id(conn))
-        return conn
-
-    def release(self, connection):
-        """Log connection release and delegate to the base pool."""
-        super().release(connection)
-        logger.debug(
-            "[REDIS POOL][RELEASE] %s conn=%s", self._pool_state(), id(connection)
-        )
-
-
-def get_redis() -> Redis:
-    """Return a process-local Redis client backed by a shared pool."""
-    global _redis_pool, _redis_client
-
-    if _redis_client is None:
-        if _redis_pool is None:
-            _redis_pool = LoggingConnectionPool.from_url(
-                Config.REDIS_URL,
-                decode_responses=True,
-                max_connections=35,
-                client_name=f"app-redis-pid-{os.getpid()}",
-            )
-            logger.info(
-                "[REDIS POOL][INIT] pid=%s max_connections=%s",
-                os.getpid(),
-                35,
-            )
-
-        _redis_client = Redis(connection_pool=_redis_pool)
-        logger.info("[REDIS CLIENT][INIT] pid=%s client_created=1", os.getpid())
-
-    return _redis_client
+_STREAM_ID_PATTERN = re.compile(r"^\d+-\d+$")
+_TERMINAL_RUN_STATES = {"SUCCESS", "FAILURE", "CANCELLED"}
+_TERMINAL_STREAM_EVENTS = {"done", "error", "cancelled"}
 
 
 def stream_key(run_id: str) -> str:
     """Return the Redis stream key used to store SSE events for a run."""
     return f"run:{run_id}:events"
+
+
+def parse_stream_event_id(event_id: str) -> tuple[int, int]:
+    """Validate and parse a Redis stream ID."""
+    if not _STREAM_ID_PATTERN.fullmatch(event_id):
+        raise ValueError(
+            "last_event_id must be a valid Redis stream ID in the form "
+            "'<milliseconds>-<sequence>'."
+        )
+
+    milliseconds, sequence = event_id.split("-", maxsplit=1)
+    return int(milliseconds), int(sequence)
+
+
+def compare_stream_event_ids(left: str, right: str) -> int:
+    """Compare two Redis stream IDs."""
+    left_id = parse_stream_event_id(left)
+    right_id = parse_stream_event_id(right)
+
+    if left_id < right_id:
+        return -1
+    if left_id > right_id:
+        return 1
+    return 0
+
+
+def get_latest_stream_event(redis: Redis, run_id: str) -> tuple[str | None, str | None]:
+    """Return the latest event ID and type stored for a run stream."""
+    latest_events = redis.xrevrange(stream_key(run_id), count=1)
+    if not latest_events:
+        return None, None
+
+    event_id, payload = latest_events[0]
+    return event_id, payload.get("type")
+
+
+def is_terminal_stream_state(state: str | None, event_type: str | None) -> bool:
+    """Return ``True`` when a run state or event marks the stream as terminal."""
+    return state in _TERMINAL_RUN_STATES or event_type in _TERMINAL_STREAM_EVENTS
 
 
 def cancel_key(run_id: str) -> str:
