@@ -5,25 +5,13 @@ configurable TTL and later verify whether a given task ID is still known.
 This prevents callers from polling Celery for task IDs that the application
 never created.
 
-Configuration values (key prefix, TTL, Redis URL) are read from
-:class:`app.config.Config`.
+Task registration shares the same process-local Redis client used by the
+streaming service so the web process and workers do not create an unbounded
+number of Redis connections under load.
 """
 
-from redis import Redis
-
 from app.config import Config
-
-
-def get_redis() -> Redis:
-    """Return a Redis client connected to :pyattr:`Config.REDIS_URL`.
-
-    A new connection is created per call.  In high-throughput scenarios
-    consider replacing this with a connection-pool singleton.
-
-    Returns:
-        Redis: A Redis client instance with ``decode_responses=True``.
-    """
-    return Redis.from_url(Config.REDIS_URL, decode_responses=True)
+from app.services.redis_client import get_redis
 
 
 def task_key(task_id: str) -> str:
