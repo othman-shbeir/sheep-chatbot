@@ -19,9 +19,13 @@ from app.services.agent import (
 )
 
 from app.services.stream_service import (
+    compare_stream_event_ids,
     get_redis,
+    get_latest_stream_event,
     get_status,
     get_task_id,
+    is_terminal_stream_state,
+    parse_stream_event_id,
     publish_event,
     request_cancel,
     set_status,
@@ -745,6 +749,18 @@ def chat_stream_events(run_id):
     responses:
       200:
         description: SSE stream established successfully.
+      204:
+        description: >
+          The stream has already reached a terminal event and the caller is
+          fully caught up, so there are no more events to deliver.
+      400:
+        description: The supplied ``last_event_id`` is not a valid Redis stream ID.
+      404:
+        description: The run identifier is not known or has expired.
+      409:
+        description: >
+          The supplied ``last_event_id`` is ahead of the latest available
+          stream event and cannot be resumed safely.
     """
     redis = get_redis()
     key = stream_key(run_id)
@@ -752,6 +768,44 @@ def chat_stream_events(run_id):
     last_event_id = request.headers.get("Last-Event-ID", "").strip()
     if not last_event_id:
         last_event_id = request.args.get("last_event_id", "0-0").strip() or "0-0"
+
+    try:
+        parse_stream_event_id(last_event_id)
+    except ValueError as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "data": None,
+        }), 400
+
+    latest_event_id, latest_event_type = get_latest_stream_event(redis, run_id)
+    state = get_status(run_id)
+    is_terminal = is_terminal_stream_state(state, latest_event_type)
+
+    if not state and not latest_event_id:
+        return jsonify({
+            "status": "error",
+            "message": "Run not found.",
+            "data": None,
+        }), 404
+
+    if latest_event_id and compare_stream_event_ids(last_event_id, latest_event_id) > 0:
+        return jsonify({
+            "status": "error",
+            "message": "last_event_id is ahead of the latest available event.",
+            "data": {
+                "run_id": run_id,
+                "last_event_id": last_event_id,
+                "latest_event_id": latest_event_id,
+                "state": state,
+            },
+        }), 409
+
+    if is_terminal and (
+        not latest_event_id
+        or compare_stream_event_ids(last_event_id, latest_event_id) >= 0
+    ):
+        return Response(status=204)
 
     def generate():
         current_id = last_event_id
@@ -761,6 +815,29 @@ def chat_stream_events(run_id):
             events = redis.xread({key: current_id}, block=30000, count=20)
 
             if not events:
+                latest_event_id, latest_event_type = get_latest_stream_event(redis, run_id)
+                state = get_status(run_id)
+                is_terminal = is_terminal_stream_state(state, latest_event_type)
+
+                if latest_event_id and compare_stream_event_ids(current_id, latest_event_id) > 0:
+                    yield format_sse(
+                        "error",
+                        {
+                            "message": "last_event_id is ahead of the latest available event.",
+                            "run_id": run_id,
+                            "last_event_id": current_id,
+                            "latest_event_id": latest_event_id,
+                            "state": state,
+                        },
+                    )
+                    return
+
+                if is_terminal and (
+                    not latest_event_id
+                    or compare_stream_event_ids(current_id, latest_event_id) >= 0
+                ):
+                    return
+
                 yield ": keepalive\n\n"
                 continue
 
