@@ -24,6 +24,8 @@ class Config:
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
     """Connection URL for the Redis instance used by the task registry."""
+    REDIS_MAX_CONNECTIONS: int = int(os.getenv("REDIS_MAX_CONNECTIONS", 35))
+    """Maximum number of Redis connections opened per process-local pool."""
 
     # Conversation summarization
     SUMMARY_TRIGGER_COUNT: int = int(os.getenv("SUMMARY_TRIGGER_COUNT", 20))
@@ -44,10 +46,14 @@ class Config:
     """Time-to-live in seconds for a task entry in Redis."""
 
     # Celery
-    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
+    CELERY_BROKER_URL: str = os.getenv(
+        "CELERY_BROKER_URL",
+        "amqp://guest:guest@rabbitmq:5672//",
+    )
     CELERY_RESULT_BACKEND: str = os.getenv(
         "CELERY_RESULT_BACKEND", "redis://redis:6379/0"
     )
+    CELERY_BROKER_POOL_LIMIT: int = int(os.getenv("CELERY_BROKER_POOL_LIMIT", 10))
     CELERY_TASK_TRACK_STARTED: bool = (
         os.getenv("CELERY_TASK_TRACK_STARTED", "true").lower() == "true"
     )
