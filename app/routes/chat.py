@@ -1,4 +1,4 @@
-"""Chat blueprint – REST and SSE endpoints for the Sheep Chatbot.
+"""Chat blueprint for REST and SSE endpoints exposed by the API.
 
 All routes are mounted under ``/api/v1/chat`` by the application factory.
 """
@@ -6,21 +6,26 @@ All routes are mounted under ``/api/v1/chat`` by the application factory.
 import math
 import json
 import uuid
-from flask import Blueprint, Response, jsonify, render_template, request
+from flask import Blueprint, Response, jsonify, render_template, request, url_for
 from celery.result import AsyncResult
 from app.celery_app import celery_app
 from app.services.agent import (
     ThreadNotFoundError,
+    UserNotFoundError,
     get_all_threads,
     get_thread_history,
-    run_agent,
     run_agent_stream,
+    validate_user_id,
 )
 
 from app.services.stream_service import (
+    compare_stream_event_ids,
     get_redis,
+    get_latest_stream_event,
     get_status,
     get_task_id,
+    is_terminal_stream_state,
+    parse_stream_event_id,
     publish_event,
     request_cancel,
     set_status,
@@ -45,14 +50,14 @@ def health():
       - Health
     summary: Service health check
     description: >
-      Returns a simple JSON payload confirming the API is reachable and
-      operational.  Use this endpoint for liveness probes in container
-      orchestrators (e.g. Kubernetes, Docker Compose health checks).
+      Returns a simple JSON payload confirming the chat routes are reachable
+      and operating correctly. Use this endpoint for chat-service liveness
+      checks in container orchestrators.
     produces:
       - application/json
     responses:
       200:
-        description: The API is healthy and accepting requests.
+        description: The chat endpoint is healthy and accepting requests.
         schema:
           type: object
           properties:
@@ -61,14 +66,14 @@ def health():
               example: success
             message:
               type: string
-              example: Chatbot API is running.
+              example: Chat endpoint works properly.
             data:
               type: string
               example: null
     """
     return jsonify({
         "status": "success",
-        "message": "Chatbot API is running.",
+        "message": "Chat endpoints works properly.",
         "data": None,
     }), 200
 
@@ -220,6 +225,8 @@ def one_shot():
                 "data": None,
             }), 400
 
+        validate_user_id(user_id)
+
         logger.info(f"Received /one-shot request from User ID {user_id} for Thread ID {thread_id}")
 
         task = process_chat_message.apply_async(
@@ -252,6 +259,13 @@ def one_shot():
             "message": str(e),
             "data": None,
         }), 400
+
+    except UserNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": "User not found.",
+            "data": None,
+        }), 404
 
     except Exception as e:
         logger.error(f"Unexpected error in /one-shot endpoint: {e}", exc_info=True)
@@ -304,7 +318,7 @@ def task_status(task_id):
                 state:
                   type: string
                   description: >
-                    Celery task state – one of PENDING, STARTED, SUCCESS,
+                    Celery task state - one of PENDING, STARTED, SUCCESS,
                     or FAILURE.
                 result:
                   type: object
@@ -450,11 +464,11 @@ def stream():
         description: >
           SSE stream.  Events emitted:
 
-          - ``delta`` – ``{"delta": "<text fragment>"}``
+          - ``delta`` - ``{"delta": "<text fragment>"}``
 
-          - ``done``  – ``{"thread_id": "...", "assistant_message": "..."}``
+          - ``done``  - ``{"thread_id": "...", "assistant_message": "..."}``
 
-          - ``error`` – ``{"message": "..."}``
+          - ``error`` - ``{"message": "..."}``
       400:
         description: A required field is missing or empty.
         schema:
@@ -512,6 +526,8 @@ def stream():
                 "data": None,
             }), 400
 
+        validate_user_id(user_id)
+
         logger.info(f"Received /stream request from User ID {user_id} for Thread ID {thread_id}")
 
         def generate():
@@ -548,6 +564,13 @@ def stream():
             "data": None,
         }), 400
 
+    except UserNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": "User not found.",
+            "data": None,
+        }), 404
+
     except Exception as e:
         logger.error(f"Unexpected error in /stream endpoint: {e}", exc_info=True)
         return jsonify({
@@ -562,6 +585,47 @@ def stream():
 
 @chat_bp.route("/stream/start", methods=["POST"])
 def chat_stream_start():
+    """Create an asynchronous streaming chat run.
+    ---
+    tags:
+      - Stream
+    summary: Start a streaming chat task
+    description: >
+      Queues a streaming chat task and returns the identifiers and follow-up
+      endpoints required to receive events, poll status, or request
+      cancellation.
+    consumes:
+      - application/json
+    produces:
+      - application/json
+    parameters:
+      - in: body
+        name: body
+        required: true
+        schema:
+          type: object
+          required:
+            - message
+            - thread_id
+            - user_id
+          properties:
+            message:
+              type: string
+              example: "Tell me about sheep nutrition."
+            thread_id:
+              type: string
+              example: "thread-abc-123"
+            user_id:
+              type: string
+              example: "user-001"
+    responses:
+      202:
+        description: Streaming task accepted and queued.
+      400:
+        description: A required field is missing or empty.
+      500:
+        description: The server failed to create the streaming task.
+    """
     try:
         data = request.get_json(force=True)
 
@@ -590,6 +654,8 @@ def chat_stream_start():
                 "message": "The 'user_id' field is required.",
                 "data": None,
             }), 400
+
+        validate_user_id(user_id)
 
         run_id = str(uuid.uuid4())
 
@@ -625,12 +691,26 @@ def chat_stream_start():
                 "run_id": run_id,
                 "task_id": task.id,
                 "thread_id": thread_id,
-                "events_url": f"/chat/stream/events/{run_id}",
-                "cancel_url": f"/chat/stream/cancel/{run_id}",
-                "status_url": f"/chat/stream/status/{run_id}",
+                "events_url": url_for("chat.chat_stream_events", run_id=run_id),
+                "cancel_url": url_for("chat.chat_stream_cancel", run_id=run_id),
+                "status_url": url_for("chat.chat_stream_status", run_id=run_id),
                 "state": "PENDING",
             },
         }), 202
+
+    except ValueError as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "data": None,
+        }), 400
+
+    except UserNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": "User not found.",
+            "data": None,
+        }), 404
 
     except Exception as e:
         return jsonify({
@@ -642,12 +722,90 @@ def chat_stream_start():
 
 @chat_bp.route("/stream/events/<run_id>", methods=["GET"])
 def chat_stream_events(run_id):
+    """Stream Redis-backed SSE events for a queued streaming run.
+    ---
+    tags:
+      - Stream
+    summary: Consume streaming chat events
+    description: >
+      Opens a Server-Sent Events stream for the specified run. Clients can
+      reconnect by sending ``Last-Event-ID`` or the ``last_event_id`` query
+      parameter to resume from the last processed event.
+    produces:
+      - text/event-stream
+    parameters:
+      - name: run_id
+        in: path
+        type: string
+        required: true
+        description: Streaming run identifier returned by ``/stream/start``.
+      - name: last_event_id
+        in: query
+        type: string
+        required: false
+        description: >
+          Optional Redis stream event ID to resume from when the
+          ``Last-Event-ID`` header is not supplied.
+    responses:
+      200:
+        description: SSE stream established successfully.
+      204:
+        description: >
+          The stream has already reached a terminal event and the caller is
+          fully caught up, so there are no more events to deliver.
+      400:
+        description: The supplied ``last_event_id`` is not a valid Redis stream ID.
+      404:
+        description: The run identifier is not known or has expired.
+      409:
+        description: >
+          The supplied ``last_event_id`` is ahead of the latest available
+          stream event and cannot be resumed safely.
+    """
     redis = get_redis()
     key = stream_key(run_id)
 
     last_event_id = request.headers.get("Last-Event-ID", "").strip()
     if not last_event_id:
         last_event_id = request.args.get("last_event_id", "0-0").strip() or "0-0"
+
+    try:
+        parse_stream_event_id(last_event_id)
+    except ValueError as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e),
+            "data": None,
+        }), 400
+
+    latest_event_id, latest_event_type = get_latest_stream_event(redis, run_id)
+    state = get_status(run_id)
+    is_terminal = is_terminal_stream_state(state, latest_event_type)
+
+    if not state and not latest_event_id:
+        return jsonify({
+            "status": "error",
+            "message": "Run not found.",
+            "data": None,
+        }), 404
+
+    if latest_event_id and compare_stream_event_ids(last_event_id, latest_event_id) > 0:
+        return jsonify({
+            "status": "error",
+            "message": "last_event_id is ahead of the latest available event.",
+            "data": {
+                "run_id": run_id,
+                "last_event_id": last_event_id,
+                "latest_event_id": latest_event_id,
+                "state": state,
+            },
+        }), 409
+
+    if is_terminal and (
+        not latest_event_id
+        or compare_stream_event_ids(last_event_id, latest_event_id) >= 0
+    ):
+        return Response(status=204)
 
     def generate():
         current_id = last_event_id
@@ -657,6 +815,29 @@ def chat_stream_events(run_id):
             events = redis.xread({key: current_id}, block=30000, count=20)
 
             if not events:
+                latest_event_id, latest_event_type = get_latest_stream_event(redis, run_id)
+                state = get_status(run_id)
+                is_terminal = is_terminal_stream_state(state, latest_event_type)
+
+                if latest_event_id and compare_stream_event_ids(current_id, latest_event_id) > 0:
+                    yield format_sse(
+                        "error",
+                        {
+                            "message": "last_event_id is ahead of the latest available event.",
+                            "run_id": run_id,
+                            "last_event_id": current_id,
+                            "latest_event_id": latest_event_id,
+                            "state": state,
+                        },
+                    )
+                    return
+
+                if is_terminal and (
+                    not latest_event_id
+                    or compare_stream_event_ids(current_id, latest_event_id) >= 0
+                ):
+                    return
+
                 yield ": keepalive\n\n"
                 continue
 
@@ -683,6 +864,25 @@ def chat_stream_events(run_id):
 
 @chat_bp.route("/stream/cancel/<run_id>", methods=["POST"])
 def chat_stream_cancel(run_id):
+    """Request cancellation of a queued or running stream.
+    ---
+    tags:
+      - Stream
+    summary: Cancel a streaming chat task
+    produces:
+      - application/json
+    parameters:
+      - name: run_id
+        in: path
+        type: string
+        required: true
+        description: Streaming run identifier returned by ``/stream/start``.
+    responses:
+      202:
+        description: Cancellation request accepted.
+      500:
+        description: The server failed to record the cancellation request.
+    """
     try:
         request_cancel(run_id)
         set_status(run_id, "CANCELLING")
@@ -718,6 +918,27 @@ def chat_stream_cancel(run_id):
 
 @chat_bp.route("/stream/status/<run_id>", methods=["GET"])
 def chat_stream_status(run_id):
+    """Return the current lifecycle state of a streaming run.
+    ---
+    tags:
+      - Stream
+    summary: Fetch streaming run status
+    produces:
+      - application/json
+    parameters:
+      - name: run_id
+        in: path
+        type: string
+        required: true
+        description: Streaming run identifier returned by ``/stream/start``.
+    responses:
+      200:
+        description: Run status fetched successfully.
+      404:
+        description: The run identifier is not known or has expired.
+      500:
+        description: The server failed to fetch the run status.
+    """
     try:
         state = get_status(run_id)
 
@@ -862,6 +1083,20 @@ def threads():
                 "offset": per_page,
             },
         }), 200
+
+    except ValueError as e:
+        return jsonify({
+            "status": False,
+            "message": str(e),
+            "data": None,
+        }), 400
+
+    except UserNotFoundError:
+        return jsonify({
+            "status": False,
+            "message": "User not found.",
+            "data": None,
+        }), 404
 
     except Exception as e:
         return jsonify({
@@ -1029,6 +1264,13 @@ def thread_history(thread_id):
             },
         }), 200
 
+    except UserNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": "User not found.",
+            "data": None,
+        }), 404
+
     except ThreadNotFoundError:
         return jsonify({
             "status": "error",
@@ -1049,3 +1291,4 @@ def thread_history(thread_id):
             "message": "Failed to fetch thread history.",
             "data": None,
         }), 500
+

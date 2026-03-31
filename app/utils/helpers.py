@@ -42,6 +42,33 @@ def extract_text_content(message: BaseMessage) -> str:
     return str(content).strip()
 
 
+def extract_stream_text_content(message: BaseMessage) -> str:
+    """Extract streaming text without trimming chunk boundaries.
+
+    Streaming model chunks may carry meaningful leading or trailing spaces.
+    Unlike :func:`extract_text_content`, this helper preserves those boundary
+    characters so concatenated deltas reconstruct the original response text.
+    """
+    content = getattr(message, "content", "")
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "text" and "text" in item:
+                    parts.append(str(item["text"]))
+                elif "text" in item:
+                    parts.append(str(item["text"]))
+            else:
+                parts.append(str(item))
+        return "\n".join(parts)
+
+    return str(content)
+
+
 def format_sse(event: str, data: dict) -> str:
     """Format a payload as a Server-Sent Events (SSE) message.
 

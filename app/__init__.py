@@ -1,3 +1,5 @@
+"""Flask application factory and Swagger configuration."""
+
 from flask import Flask, jsonify
 from flasgger import Swagger
 
@@ -33,6 +35,7 @@ SWAGGER_CONFIG = {
 
 
 def create_app():
+    """Create and configure the Flask application instance."""
     app = Flask(
         __name__,
         template_folder="templates",
@@ -43,6 +46,16 @@ def create_app():
     app.register_blueprint(chat_bp, url_prefix="/api/v1/chat")
 
     Swagger(app, template=SWAGGER_TEMPLATE, config=SWAGGER_CONFIG)
+
+    @app.route("/", methods=["GET"])
+    def app_health():
+        return jsonify(
+            {
+                "status": "success",
+                "message": "The application works properly.",
+                "data": None,
+            }
+        ), 200
 
     @app.errorhandler(404)
     def not_found(e):

@@ -1,3 +1,5 @@
+"""Ad-hoc load test script for the one-shot chat task flow."""
+
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed

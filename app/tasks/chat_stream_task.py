@@ -1,10 +1,8 @@
+"""Celery task for Redis-backed streaming chat responses."""
+
 from app.agents.agent import run_agent_stream
 from app.celery_app import celery_app
-from app.services.stream_service import (
-    is_cancel_requested,
-    publish_event,
-    set_status,
-)
+from app.services.stream_service import is_cancel_requested, publish_event, set_status
 
 
 @celery_app.task(
@@ -16,8 +14,9 @@ def process_chat_stream(
     run_id: str,
     user_input: str,
     thread_id: str,
-    user_id: str
+    user_id: str,
 ) -> dict:
+    """Stream agent output through Redis events until completion or cancellation."""
     set_status(run_id, "STARTED")
     assistant_parts: list[str] = []
 
@@ -35,7 +34,7 @@ def process_chat_stream(
         for delta in run_agent_stream(
             user_input=user_input,
             thread_id=thread_id,
-            user_id=user_id
+            user_id=user_id,
         ):
             if is_cancel_requested(run_id):
                 assistant_text = "".join(assistant_parts).strip()
@@ -59,14 +58,7 @@ def process_chat_stream(
                 }
 
             assistant_parts.append(delta)
-
-            publish_event(
-                run_id,
-                "delta",
-                {
-                    "delta": delta,
-                },
-            )
+            publish_event(run_id, "delta", {"delta": delta})
 
         assistant_text = "".join(assistant_parts).strip()
 

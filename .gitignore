@@ -36,3 +36,6 @@ npm-debug.log*
 .cache/
 
 old/*
+
+*test*.json
+*test*.csv
