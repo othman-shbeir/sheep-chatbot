@@ -14,9 +14,9 @@ from app.db import (
     get_user_by_id,
 )
 from app.utils import extract_stream_text_content, extract_text_content
-from app.logger import setup_logger
+from app.core.logging_config import get_logger
 
-logger = setup_logger(__name__)
+logger = get_logger("system", __name__)
 
 SYSTEM_PROMPT = """
 You are a helpful, warm, and knowledgeable AI assistant.

@@ -1,12 +1,10 @@
 """Flask application factory and Swagger configuration."""
 
 from flask import Flask, jsonify
-from flasgger import Swagger
 
-from app.routes import chat_bp
-from app.logger import setup_logger
+from app.core.logging_config import configure_flask_logging, configure_logging, get_logger
 
-logger = setup_logger(__name__)
+logger = get_logger("web", __name__)
 
 SWAGGER_TEMPLATE = {
     "info": {
@@ -36,11 +34,16 @@ SWAGGER_CONFIG = {
 
 def create_app():
     """Create and configure the Flask application instance."""
+    from flasgger import Swagger
+    from app.routes import chat_bp
+
+    configure_logging()
     app = Flask(
         __name__,
         template_folder="templates",
         static_folder="static",
     )
+    configure_flask_logging(app)
 
     logger.info("Initializing Flask application and registering blueprints...")
     app.register_blueprint(chat_bp, url_prefix="/api/v1/chat")

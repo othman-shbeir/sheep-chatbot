@@ -1,11 +1,10 @@
 """Celery task for one-shot chat processing."""
 
-from celery.utils.log import get_task_logger
-
 from app.agents.agent import run_agent
 from app.celery_app import celery_app
+from app.core.logging_config import get_logger
 
-logger = get_task_logger(__name__)
+logger = get_logger("celery", __name__)
 
 
 @celery_app.task(
@@ -20,18 +19,32 @@ def process_chat_message(
 ) -> dict:
     """Execute a one-shot chat request in a Celery worker."""
     logger.info(
-        "Starting Celery async task for chat message (Thread %s, User %s)",
+        "Processing async chat task task_id=%s thread_id=%s user_id=%s",
+        self.request.id,
         thread_id,
         user_id,
     )
 
-    assistant_message = run_agent(
-        user_input=user_input,
-        thread_id=thread_id,
-        user_id=user_id,
-    )
+    try:
+        assistant_message = run_agent(
+            user_input=user_input,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
+    except Exception:
+        logger.exception(
+            "Celery chat task execution failed task_id=%s thread_id=%s user_id=%s",
+            self.request.id,
+            thread_id,
+            user_id,
+        )
+        raise
 
-    logger.info("Completed Celery agent inference for Thread %s", thread_id)
+    logger.info(
+        "Celery chat task completed task_id=%s thread_id=%s",
+        self.request.id,
+        thread_id,
+    )
 
     return {
         "thread_id": thread_id,
