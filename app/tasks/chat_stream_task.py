@@ -2,7 +2,10 @@
 
 from app.agents.agent import run_agent_stream
 from app.celery_app import celery_app
+from app.core.logging_config import get_logger
 from app.services.stream_service import is_cancel_requested, publish_event, set_status
+
+logger = get_logger("celery", __name__)
 
 
 @celery_app.task(
@@ -19,6 +22,13 @@ def process_chat_stream(
     """Stream agent output through Redis events until completion or cancellation."""
     set_status(run_id, "STARTED")
     assistant_parts: list[str] = []
+    logger.info(
+        "Celery stream task started task_id=%s run_id=%s thread_id=%s user_id=%s",
+        self.request.id,
+        run_id,
+        thread_id,
+        user_id,
+    )
 
     try:
         publish_event(
@@ -40,6 +50,13 @@ def process_chat_stream(
                 assistant_text = "".join(assistant_parts).strip()
 
                 set_status(run_id, "CANCELLED")
+                logger.warning(
+                    "Celery stream task cancelled task_id=%s run_id=%s thread_id=%s partial_chars=%s",
+                    self.request.id,
+                    run_id,
+                    thread_id,
+                    len(assistant_text),
+                )
                 publish_event(
                     run_id,
                     "cancelled",
@@ -63,6 +80,13 @@ def process_chat_stream(
         assistant_text = "".join(assistant_parts).strip()
 
         set_status(run_id, "SUCCESS")
+        logger.info(
+            "Celery stream task completed task_id=%s run_id=%s thread_id=%s chars=%s",
+            self.request.id,
+            run_id,
+            thread_id,
+            len(assistant_text),
+        )
         publish_event(
             run_id,
             "done",
@@ -82,6 +106,12 @@ def process_chat_stream(
 
     except Exception as e:
         set_status(run_id, "FAILURE")
+        logger.exception(
+            "Celery stream task failed task_id=%s run_id=%s thread_id=%s",
+            self.request.id,
+            run_id,
+            thread_id,
+        )
         publish_event(
             run_id,
             "error",

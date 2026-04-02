@@ -4,17 +4,17 @@ including JWT token validation and internal key verification.
 """
 
 import os
-import logging
 from functools import wraps
 from flask import request, g
 from dotenv import load_dotenv 
 import jwt
 import datetime
+from app.core.logging_config import get_logger
 # Load environment variables
 load_dotenv()
 
 # Get logger for this module
-logger = logging.getLogger(__name__)
+logger = get_logger("web", __name__)
 
 # Get JWT secret key and internal API key from environment variables
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-jwt-secret-key-here")
@@ -39,7 +39,7 @@ def verify_token(token):
     except jwt.InvalidTokenError as e:
         return False, f"Invalid token: {str(e)}"
     except Exception as e:
-        logger.error(f"Token verification error: {str(e)}", exc_info=True)
+        logger.exception("Token verification failed")
         return False, "Token verification failed"
 
 def verify_internal_key(key):

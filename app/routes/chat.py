@@ -9,6 +9,7 @@ import uuid
 from flask import Blueprint, Response, jsonify, render_template, request, url_for
 from celery.result import AsyncResult
 from app.celery_app import celery_app
+from app.core.logging_config import get_logger, get_request_id, logging_context
 from app.services.agent import (
     ThreadNotFoundError,
     UserNotFoundError,
@@ -35,9 +36,9 @@ from app.services.stream_service import (
 from app.utils import format_sse, register_task, task_exists
 from app.tasks.chat_tasks import process_chat_message
 from app.tasks.chat_stream_task import process_chat_stream
-from app.logger import setup_logger
 
-logger = setup_logger(__name__)
+logger = get_logger("web", __name__)
+redis_logger = get_logger("redis", __name__)
 
 chat_bp = Blueprint("chat", __name__)
 
@@ -227,7 +228,12 @@ def one_shot():
 
         validate_user_id(user_id)
 
-        logger.info(f"Received /one-shot request from User ID {user_id} for Thread ID {thread_id}")
+        request_id = get_request_id()
+        logger.info(
+            "Chat request queued for async processing thread_id=%s user_id=%s",
+            thread_id,
+            user_id,
+        )
 
         task = process_chat_message.apply_async(
             kwargs={
@@ -236,9 +242,17 @@ def one_shot():
                 "user_id": user_id,
             },
             queue="chat",
+            headers={"request_id": request_id},
         )
 
         register_task(task.id)
+
+        logger.info(
+            "Async chat task published thread_id=%s user_id=%s task_id=%s",
+            thread_id,
+            user_id,
+            task.id,
+        )
 
         return jsonify(
             {
@@ -268,7 +282,7 @@ def one_shot():
         }), 404
 
     except Exception as e:
-        logger.error(f"Unexpected error in /one-shot endpoint: {e}", exc_info=True)
+        logger.exception("Unexpected error in /one-shot endpoint")
         return jsonify({
             "status": "error",
             "message": "An unexpected error occurred.",
@@ -409,6 +423,7 @@ def task_status(task_id):
         ), 200
 
     except Exception as e:
+        logger.exception("Failed to fetch Celery task status task_id=%s", task_id)
         return jsonify(
             {
                 "status": "error",
@@ -528,29 +543,50 @@ def stream():
 
         validate_user_id(user_id)
 
-        logger.info(f"Received /stream request from User ID {user_id} for Thread ID {thread_id}")
+        request_id = get_request_id()
+        logger.info(
+            "Direct stream request received thread_id=%s user_id=%s",
+            thread_id,
+            user_id,
+        )
 
         def generate():
-            assistant_parts: list[str] = []
-            try:
-                for delta in run_agent_stream(
-                    user_input=message,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                ):
-                    assistant_parts.append(delta)
-                    yield format_sse("delta", {"delta": delta})
+            with logging_context(request_id=request_id, service_name="web"):
+                assistant_parts: list[str] = []
+                try:
+                    for delta in run_agent_stream(
+                        user_input=message,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    ):
+                        assistant_parts.append(delta)
+                        yield format_sse("delta", {"delta": delta, "request_id": request_id})
 
-                assistant_text = " ".join(assistant_parts).strip()
-                yield format_sse(
-                    "done",
-                    {
-                        "thread_id": thread_id,
-                        "assistant_message": assistant_text,
-                    },
-                )
-            except Exception as e:
-                yield format_sse("error", {"message": str(e)})
+                    assistant_text = "".join(assistant_parts).strip()
+                    logger.info(
+                        "Direct stream request completed thread_id=%s user_id=%s chars=%s",
+                        thread_id,
+                        user_id,
+                        len(assistant_text),
+                    )
+                    yield format_sse(
+                        "done",
+                        {
+                            "thread_id": thread_id,
+                            "assistant_message": assistant_text,
+                            "request_id": request_id,
+                        },
+                    )
+                except Exception as e:
+                    logger.exception(
+                        "Direct stream request failed thread_id=%s user_id=%s",
+                        thread_id,
+                        user_id,
+                    )
+                    yield format_sse(
+                        "error",
+                        {"message": str(e), "request_id": request_id},
+                    )
 
         resp = Response(generate(), mimetype="text/event-stream")
         resp.headers["Cache-Control"] = "no-cache"
@@ -572,7 +608,7 @@ def stream():
         }), 404
 
     except Exception as e:
-        logger.error(f"Unexpected error in /stream endpoint: {e}", exc_info=True)
+        logger.exception("Unexpected error in /stream endpoint")
         return jsonify({
             "status": "error",
             "message": "An unexpected error occurred.",
@@ -658,6 +694,13 @@ def chat_stream_start():
         validate_user_id(user_id)
 
         run_id = str(uuid.uuid4())
+        request_id = get_request_id()
+        logger.info(
+            "Queued stream request received run_id=%s thread_id=%s user_id=%s",
+            run_id,
+            thread_id,
+            user_id,
+        )
 
         set_status(run_id, "PENDING")
         publish_event(
@@ -674,14 +717,19 @@ def chat_stream_start():
                 "run_id": run_id,
                 "user_input": message,
                 "thread_id": thread_id,
-                "user_id": user_id
+                "user_id": user_id,
             },
             queue="stream",
+            headers={"request_id": request_id},
         )
 
         set_task_id(run_id, task.id)
-        register_task(
-            task.id
+        register_task(task.id)
+        logger.info(
+            "Queued stream task published run_id=%s task_id=%s thread_id=%s",
+            run_id,
+            task.id,
+            thread_id,
         )
 
         return jsonify({
@@ -713,6 +761,7 @@ def chat_stream_start():
         }), 404
 
     except Exception as e:
+        logger.exception("Failed to start streaming task")
         return jsonify({
             "status": "error",
             "message": "Failed to start streaming task.",
@@ -764,6 +813,7 @@ def chat_stream_events(run_id):
     """
     redis = get_redis()
     key = stream_key(run_id)
+    request_id = get_request_id()
 
     last_event_id = request.headers.get("Last-Event-ID", "").strip()
     if not last_event_id:
@@ -808,53 +858,86 @@ def chat_stream_events(run_id):
         return Response(status=204)
 
     def generate():
-        current_id = last_event_id
-        yield ": connected\n\n"
+        with logging_context(request_id=request_id, service_name="web"):
+            current_id = last_event_id
+            redis_logger.info(
+                "Redis stream subscription opened run_id=%s last_event_id=%s",
+                run_id,
+                last_event_id,
+            )
+            yield ": connected\n\n"
 
-        while True:
-            events = redis.xread({key: current_id}, block=30000, count=20)
+            try:
+                while True:
+                    events = redis.xread({key: current_id}, block=30000, count=20)
 
-            if not events:
-                latest_event_id, latest_event_type = get_latest_stream_event(redis, run_id)
-                state = get_status(run_id)
-                is_terminal = is_terminal_stream_state(state, latest_event_type)
+                    if not events:
+                        redis_logger.debug(
+                            "Redis stream read timeout run_id=%s current_id=%s",
+                            run_id,
+                            current_id,
+                        )
+                        latest_event_id, latest_event_type = get_latest_stream_event(redis, run_id)
+                        state = get_status(run_id)
+                        is_terminal = is_terminal_stream_state(state, latest_event_type)
 
-                if latest_event_id and compare_stream_event_ids(current_id, latest_event_id) > 0:
-                    yield format_sse(
-                        "error",
-                        {
-                            "message": "last_event_id is ahead of the latest available event.",
-                            "run_id": run_id,
-                            "last_event_id": current_id,
-                            "latest_event_id": latest_event_id,
-                            "state": state,
-                        },
-                    )
-                    return
+                        if latest_event_id and compare_stream_event_ids(current_id, latest_event_id) > 0:
+                            yield format_sse(
+                                "error",
+                                {
+                                    "message": "last_event_id is ahead of the latest available event.",
+                                    "run_id": run_id,
+                                    "last_event_id": current_id,
+                                    "latest_event_id": latest_event_id,
+                                    "state": state,
+                                    "request_id": request_id,
+                                },
+                            )
+                            return
 
-                if is_terminal and (
-                    not latest_event_id
-                    or compare_stream_event_ids(current_id, latest_event_id) >= 0
-                ):
-                    return
+                        if is_terminal and (
+                            not latest_event_id
+                            or compare_stream_event_ids(current_id, latest_event_id) >= 0
+                        ):
+                            redis_logger.info(
+                                "Redis stream subscription completed run_id=%s current_id=%s state=%s",
+                                run_id,
+                                current_id,
+                                state,
+                            )
+                            return
 
-                yield ": keepalive\n\n"
-                continue
+                        yield ": keepalive\n\n"
+                        continue
 
-            for _, messages in events:
-                for msg_id, msg_data in messages:
-                    current_id = msg_id
-                    event_type = msg_data.get("type", "message")
-                    payload = json.loads(msg_data.get("data", "{}"))
+                    for _, messages in events:
+                        redis_logger.debug(
+                            "Redis stream batch received run_id=%s count=%s",
+                            run_id,
+                            len(messages),
+                        )
+                        for msg_id, msg_data in messages:
+                            current_id = msg_id
+                            event_type = msg_data.get("type", "message")
+                            payload = json.loads(msg_data.get("data", "{}"))
 
-                    yield (
-                        f"id: {msg_id}\n"
-                        f"event: {event_type}\n"
-                        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                    )
+                            yield (
+                                f"id: {msg_id}\n"
+                                f"event: {event_type}\n"
+                                f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                            )
 
-                    if event_type in {"done", "error", "cancelled"}:
-                        return
+                            if event_type in {"done", "error", "cancelled"}:
+                                redis_logger.info(
+                                    "Redis stream terminal event delivered run_id=%s event_type=%s event_id=%s",
+                                    run_id,
+                                    event_type,
+                                    msg_id,
+                                )
+                                return
+            except Exception:
+                redis_logger.exception("Redis stream subscription failed run_id=%s", run_id)
+                raise
 
     response = Response(generate(), mimetype="text/event-stream")
     response.headers["Cache-Control"] = "no-cache"
@@ -884,12 +967,14 @@ def chat_stream_cancel(run_id):
         description: The server failed to record the cancellation request.
     """
     try:
+        logger.info("Stream cancellation requested run_id=%s", run_id)
         request_cancel(run_id)
         set_status(run_id, "CANCELLING")
 
         task_id = get_task_id(run_id)
         if task_id:
             celery_app.control.revoke(task_id, terminate=False)
+            logger.info("Celery revoke requested run_id=%s task_id=%s", run_id, task_id)
 
         publish_event(
             run_id,
@@ -909,6 +994,7 @@ def chat_stream_cancel(run_id):
         }), 202
 
     except Exception as e:
+        logger.exception("Failed to request stream cancellation run_id=%s", run_id)
         return jsonify({
             "status": "error",
             "message": "Failed to request cancellation.",
@@ -959,6 +1045,7 @@ def chat_stream_status(run_id):
         }), 200
 
     except Exception as e:
+        logger.exception("Failed to fetch stream status run_id=%s", run_id)
         return jsonify({
             "status": "error",
             "message": "Failed to fetch run status.",
@@ -1099,6 +1186,7 @@ def threads():
         }), 404
 
     except Exception as e:
+        logger.exception("Failed to fetch threads user_id=%s", user_id)
         return jsonify({
             "status": False,
             "message": "Failed to fetch threads.",
@@ -1286,6 +1374,11 @@ def thread_history(thread_id):
         }), 400
 
     except Exception as e:
+        logger.exception(
+            "Failed to fetch thread history thread_id=%s user_id=%s",
+            thread_id,
+            user_id,
+        )
         return jsonify({
             "status": "error",
             "message": "Failed to fetch thread history.",

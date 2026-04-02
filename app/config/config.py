@@ -37,6 +37,19 @@ class Config:
     # Flask
     FLASK_ENV: str = os.getenv("FLASK_ENV", "development")
     FLASK_DEBUG: bool = os.getenv("FLASK_DEBUG", "true").lower() == "true"
+    REQUEST_ID_HEADER: str = os.getenv("REQUEST_ID_HEADER", "X-Request-ID")
+
+    # Logging
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_ENABLE_CONSOLE: str = os.getenv("LOG_ENABLE_CONSOLE", "true")
+    LOG_ENABLE_FILE: str = os.getenv(
+        "LOG_ENABLE_FILE",
+        "true" if FLASK_ENV.lower() == "production" else "false",
+    )
+    LOG_DIR: str = os.getenv("LOG_DIR", "logs")
+    LOG_MAX_BYTES: int = int(os.getenv("LOG_MAX_BYTES", 10 * 1024 * 1024))
+    LOG_BACKUP_COUNT: int = int(os.getenv("LOG_BACKUP_COUNT", 5))
+    LOG_JSON: str = os.getenv("LOG_JSON", "false")
 
     # Task registry
     TASK_KEY_PREFIX: str = "celery:task:"

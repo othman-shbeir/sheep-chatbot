@@ -11,7 +11,10 @@ number of Redis connections under load.
 """
 
 from app.config import Config
+from app.core.logging_config import get_logger
 from app.services.redis_client import get_redis
+
+logger = get_logger("redis", __name__)
 
 
 def task_key(task_id: str) -> str:
@@ -37,8 +40,13 @@ def register_task(task_id: str) -> None:
     Args:
         task_id: The Celery task identifier to register.
     """
-    redis = get_redis()
-    redis.set(task_key(task_id), "1", ex=Config.TASK_TTL_SECONDS)
+    try:
+        redis = get_redis()
+        redis.set(task_key(task_id), "1", ex=Config.TASK_TTL_SECONDS)
+        logger.info("Redis task registered task_id=%s ttl_seconds=%s", task_id, Config.TASK_TTL_SECONDS)
+    except Exception:
+        logger.exception("Failed to register Redis task task_id=%s", task_id)
+        raise
 
 
 def task_exists(task_id: str) -> bool:
@@ -50,5 +58,11 @@ def task_exists(task_id: str) -> bool:
     Returns:
         bool: ``True`` if the key exists in Redis, ``False`` otherwise.
     """
-    redis = get_redis()
-    return redis.exists(task_key(task_id)) == 1
+    try:
+        redis = get_redis()
+        exists = redis.exists(task_key(task_id)) == 1
+        logger.debug("Redis task lookup task_id=%s exists=%s", task_id, exists)
+        return exists
+    except Exception:
+        logger.exception("Failed to look up Redis task task_id=%s", task_id)
+        raise

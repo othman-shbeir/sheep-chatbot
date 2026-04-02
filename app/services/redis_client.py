@@ -11,9 +11,9 @@ from threading import Lock
 from redis import ConnectionPool, Redis
 
 from app.config.config import Config
-from app.logger import setup_logger
+from app.core.logging_config import get_logger
 
-logger = setup_logger(__name__)
+logger = get_logger("redis", __name__)
 
 _redis_pool: "LoggingConnectionPool | None" = None
 _redis_client: Redis | None = None
@@ -41,15 +41,31 @@ class LoggingConnectionPool(ConnectionPool):
 
     def get_connection(self, command_name=None, *keys, **options):
         """Log connection checkout and delegate to the base pool."""
-        conn = super().get_connection(command_name, *keys, **options)
-        logger.debug("[REDIS POOL][ACQUIRE] %s conn=%s", self._pool_state(), id(conn))
+        try:
+            conn = super().get_connection(command_name, *keys, **options)
+        except Exception:
+            logger.exception(
+                "Redis connection checkout failed command=%s state=%s",
+                command_name,
+                self._pool_state(),
+            )
+            raise
+
+        logger.debug(
+            "Redis connection acquired command=%s state=%s conn=%s",
+            command_name,
+            self._pool_state(),
+            id(conn),
+        )
         return conn
 
     def release(self, connection):
         """Log connection release and delegate to the base pool."""
         super().release(connection)
         logger.debug(
-            "[REDIS POOL][RELEASE] %s conn=%s", self._pool_state(), id(connection)
+            "Redis connection released state=%s conn=%s",
+            self._pool_state(),
+            id(connection),
         )
 
 
@@ -62,20 +78,30 @@ def get_redis() -> Redis:
 
     with _redis_lock:
         if _redis_client is None:
-            if _redis_pool is None:
-                _redis_pool = LoggingConnectionPool.from_url(
-                    Config.REDIS_URL,
-                    decode_responses=True,
-                    max_connections=Config.REDIS_MAX_CONNECTIONS,
-                    client_name=f"app-redis-pid-{os.getpid()}",
-                )
-                logger.info(
-                    "[REDIS POOL][INIT] pid=%s max_connections=%s",
-                    os.getpid(),
-                    Config.REDIS_MAX_CONNECTIONS,
-                )
+            try:
+                if _redis_pool is None:
+                    _redis_pool = LoggingConnectionPool.from_url(
+                        Config.REDIS_URL,
+                        decode_responses=True,
+                        max_connections=Config.REDIS_MAX_CONNECTIONS,
+                        client_name=f"app-redis-pid-{os.getpid()}",
+                    )
+                    logger.info(
+                        "Redis pool initialized pid=%s max_connections=%s",
+                        os.getpid(),
+                        Config.REDIS_MAX_CONNECTIONS,
+                    )
 
-            _redis_client = Redis(connection_pool=_redis_pool)
-            logger.info("[REDIS CLIENT][INIT] pid=%s client_created=1", os.getpid())
+                _redis_client = Redis(connection_pool=_redis_pool)
+
+                ping = getattr(_redis_client, "ping", None)
+                if callable(ping):
+                    ping()
+                    logger.info("Redis connection verified pid=%s", os.getpid())
+
+                logger.info("Redis client initialized pid=%s", os.getpid())
+            except Exception:
+                logger.exception("Redis client initialization failed pid=%s", os.getpid())
+                raise
 
     return _redis_client
