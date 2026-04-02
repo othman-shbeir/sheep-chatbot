@@ -1,3 +1,4 @@
+import uuid
 from functools import lru_cache
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -9,7 +10,7 @@ from app.db import (
     add_message,
     create_summary,
     get_latest_summary,
-    get_messages_after_summary,
+    get_messages_after_order,
     get_or_create_thread,
     get_user_by_id,
 )
@@ -99,11 +100,99 @@ def get_model_with_search():
     return get_llm().bind_tools([{"google_search": {}}])
 
 
+def _normalize_required_text(value: str, field_name: str) -> str:
+    normalized = (value or "").strip()
+    if not normalized:
+        raise ValueError(f"{field_name} is required.")
+    return normalized
+
+
+def _parse_user_uuid(user_id: str) -> tuple[str, uuid.UUID]:
+    normalized_user_id = _normalize_required_text(user_id, "user_id")
+
+    try:
+        user_uuid = uuid.UUID(normalized_user_id)
+    except ValueError as e:
+        raise ValueError("user_id must be a valid UUID.") from e
+
+    return normalized_user_id, user_uuid
+
+
+def _build_thread_title(user_input: str, *, max_length: int = 60) -> str:
+    if len(user_input) <= max_length:
+        return user_input
+    return f"{user_input[:max_length]}..."
+
+
+def _to_prompt_message(message):
+    if message.role == "user":
+        return HumanMessage(content=message.content)
+    if message.role == "assistant":
+        return AIMessage(content=message.content)
+    if message.role == "system":
+        return SystemMessage(content=message.content)
+    return AIMessage(content=message.content)
+
+
+def _prepare_thread_turn(
+    user_input: str,
+    thread_id: str,
+    user_id: str,
+    *,
+    operation_name: str,
+) -> tuple[str, str, str]:
+    require_database()
+    normalized_thread_id = _normalize_required_text(thread_id, "thread_id")
+    normalized_user_input = _normalize_required_text(user_input, "user_input")
+    normalized_user_id, user_uuid = _parse_user_uuid(user_id)
+
+    with SessionLocal() as session:
+        user = get_user_by_id(session, user_uuid)
+        if not user:
+            logger.warning("%s failed: User ID %s not found", operation_name, user_uuid)
+            raise ValueError("User not found.")
+
+        logger.info("Loaded User %s from DB for %s", user_uuid, operation_name)
+
+        get_or_create_thread(
+            session=session,
+            thread_id=normalized_thread_id,
+            user_id=user.id,
+            title=_build_thread_title(normalized_user_input),
+        )
+
+        add_message(
+            session=session,
+            thread_id=normalized_thread_id,
+            role="user",
+            content=normalized_user_input,
+        )
+        session.commit()
+
+    return normalized_user_input, normalized_thread_id, normalized_user_id
+
+
+def _store_assistant_message(thread_id: str, assistant_text: str) -> None:
+    with SessionLocal() as session:
+        add_message(
+            session=session,
+            thread_id=thread_id,
+            role="assistant",
+            content=assistant_text,
+        )
+        session.commit()
+
+
 def build_context_messages(thread_id: str):
     require_database()
     with SessionLocal() as session:
         latest_summary = get_latest_summary(session, thread_id)
-        unsummarized_messages = get_messages_after_summary(session, thread_id)
+        covered_until_order = latest_summary.covered_until_order if latest_summary else None
+        unsummarized_messages = get_messages_after_order(
+            session,
+            thread_id,
+            covered_until_order,
+        )
 
     messages = [SystemMessage(content=SYSTEM_PROMPT)]
 
@@ -118,29 +207,49 @@ def build_context_messages(thread_id: str):
             )
         )
 
-    for msg in unsummarized_messages:
-        if msg.role == "user":
-            messages.append(HumanMessage(content=msg.content))
-        elif msg.role == "assistant":
-            messages.append(AIMessage(content=msg.content))
-        elif msg.role == "system":
-            messages.append(SystemMessage(content=msg.content))
-        else:
-            messages.append(AIMessage(content=msg.content))
+    messages.extend(_to_prompt_message(msg) for msg in unsummarized_messages)
 
     return messages
 
 
-def maybe_compact_thread(thread_id: str, summary_trigger_count: int = 20, keep_recent_count: int = 5):
+def maybe_compact_thread(
+    thread_id: str,
+    summary_trigger_count: int | None = None,
+    keep_recent_count: int | None = None,
+):
     require_database()
+    summary_trigger_count = (
+        Config.SUMMARY_TRIGGER_COUNT
+        if summary_trigger_count is None
+        else summary_trigger_count
+    )
+    keep_recent_count = (
+        Config.KEEP_RECENT_COUNT if keep_recent_count is None else keep_recent_count
+    )
+
+    if summary_trigger_count < 1:
+        raise ValueError("summary_trigger_count must be greater than or equal to 1.")
+
+    if keep_recent_count < 0:
+        raise ValueError("keep_recent_count must be greater than or equal to 0.")
+
     with SessionLocal() as session:
         latest_summary = get_latest_summary(session, thread_id)
-        unsummarized_messages = get_messages_after_summary(session, thread_id)
+        covered_until_order = latest_summary.covered_until_order if latest_summary else None
+        unsummarized_messages = get_messages_after_order(
+            session,
+            thread_id,
+            covered_until_order,
+        )
 
         if len(unsummarized_messages) <= summary_trigger_count:
             return
 
-        messages_to_summarize = unsummarized_messages[:-keep_recent_count]
+        messages_to_summarize = (
+            unsummarized_messages[:-keep_recent_count]
+            if keep_recent_count
+            else unsummarized_messages
+        )
         if not messages_to_summarize:
             return
 
@@ -177,67 +286,18 @@ def run_agent(
     thread_id: str,
     user_id: str,
 ) -> str:
-    require_database()
-    thread_id = thread_id.strip()
-    user_input = user_input.strip()
-    user_id = user_id.strip()
-
-    if not thread_id:
-        raise ValueError("thread_id is required.")
-
-    if not user_input:
-        raise ValueError("user_input is required.")
-
-    if not user_id:
-        raise ValueError("user_id is required.")
-
-    import uuid
-    try:
-        user_uuid = uuid.UUID(user_id)
-    except ValueError as e:
-        raise ValueError("user_id must be a valid UUID.") from e
-
-    with SessionLocal() as session:
-        user = get_user_by_id(session, user_uuid)
-        if not user:
-            logger.warning(f"run_agent failed: User ID {user_uuid} not found")
-            raise ValueError("User not found.")
-
-        logger.info(f"Loaded User {user_uuid} from DB for run_agent")
-
-        title = user_input[:60]
-        if len(user_input) > 60:
-            title += "..."
-
-        get_or_create_thread(
-            session=session,
-            thread_id=thread_id,
-            user_id=user.id,
-            title=title,
-        )
-
-        add_message(
-            session=session,
-            thread_id=thread_id,
-            role="user",
-            content=user_input,
-        )
-
-        session.commit()
+    user_input, thread_id, _ = _prepare_thread_turn(
+        user_input,
+        thread_id,
+        user_id,
+        operation_name="run_agent",
+    )
 
     context_messages = build_context_messages(thread_id)
     response = get_model_with_search().invoke(context_messages)
     assistant_text = extract_text_content(response)
 
-    with SessionLocal() as session:
-        add_message(
-            session=session,
-            thread_id=thread_id,
-            role="assistant",
-            content=assistant_text,
-        )
-        session.commit()
-
+    _store_assistant_message(thread_id, assistant_text)
     maybe_compact_thread(thread_id)
 
     return assistant_text
@@ -248,52 +308,12 @@ def run_agent_stream(
     thread_id: str,
     user_id: str,
 ):
-    require_database()
-    thread_id = (thread_id or "").strip()
-    user_input = (user_input or "").strip()
-    user_id = (user_id or "").strip()
-
-    if not thread_id:
-        raise ValueError("thread_id is required.")
-
-    if not user_input:
-        raise ValueError("user_input is required.")
-
-    if not user_id:
-        raise ValueError("user_id is required.")
-
-    import uuid
-    try:
-        user_uuid = uuid.UUID(user_id)
-    except ValueError as e:
-        raise ValueError("user_id must be a valid UUID.") from e
-
-    with SessionLocal() as session:
-        user = get_user_by_id(session, user_uuid)
-        if not user:
-            logger.warning(f"run_agent_stream failed: User ID {user_uuid} not found")
-            raise ValueError("User not found.")
-
-        logger.info(f"Loaded User {user_uuid} from DB for run_agent_stream")
-
-        title = user_input[:60]
-        if len(user_input) > 60:
-            title += "..."
-
-        get_or_create_thread(
-            session=session,
-            thread_id=thread_id,
-            user_id=user.id,
-            title=title,
-        )
-
-        add_message(
-            session=session,
-            thread_id=thread_id,
-            role="user",
-            content=user_input,
-        )
-        session.commit()
+    user_input, thread_id, _ = _prepare_thread_turn(
+        user_input,
+        thread_id,
+        user_id,
+        operation_name="run_agent_stream",
+    )
 
     context_messages = build_context_messages(thread_id)
 
@@ -307,14 +327,6 @@ def run_agent_stream(
 
     assistant_text = "".join(assistant_parts).strip()
 
-    with SessionLocal() as session:
-        add_message(
-            session=session,
-            thread_id=thread_id,
-            role="assistant",
-            content=assistant_text,
-        )
-        session.commit()
-
+    _store_assistant_message(thread_id, assistant_text)
     maybe_compact_thread(thread_id)
 

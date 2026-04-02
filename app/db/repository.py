@@ -90,17 +90,24 @@ def get_latest_summary(session: Session, thread_id: str) -> ThreadSummary | None
     ).scalars().first()
 
 
-def get_messages_after_summary(session: Session, thread_id: str) -> list[ThreadMessage]:
-    summary = get_latest_summary(session, thread_id)
-
+def get_messages_after_order(
+    session: Session,
+    thread_id: str,
+    covered_until_order: int | None = None,
+) -> list[ThreadMessage]:
     stmt = select(ThreadMessage).where(ThreadMessage.thread_id == thread_id)
 
-    if summary:
-        stmt = stmt.where(ThreadMessage.message_order > summary.covered_until_order)
+    if covered_until_order is not None:
+        stmt = stmt.where(ThreadMessage.message_order > covered_until_order)
 
     stmt = stmt.order_by(ThreadMessage.message_order.asc())
-
     return list(session.execute(stmt).scalars().all())
+
+
+def get_messages_after_summary(session: Session, thread_id: str) -> list[ThreadMessage]:
+    summary = get_latest_summary(session, thread_id)
+    covered_until_order = summary.covered_until_order if summary else None
+    return get_messages_after_order(session, thread_id, covered_until_order)
 
 
 def get_all_messages(session: Session, thread_id: str) -> list[ThreadMessage]:

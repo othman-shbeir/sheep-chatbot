@@ -3,13 +3,20 @@
 All routes are mounted under ``/api/v1/chat`` by the application factory.
 """
 
-import math
 import json
 import uuid
-from flask import Blueprint, Response, jsonify, render_template, request, url_for
+
 from celery.result import AsyncResult
+from flask import Blueprint, Response, jsonify, render_template, request, url_for
+
 from app.celery_app import celery_app
 from app.core.logging_config import get_logger, get_request_id, logging_context
+from app.routes.chat_helpers import (
+    build_pagination_metadata,
+    parse_pagination,
+    read_chat_request_payload,
+    require_query_param,
+)
 from app.services.agent import (
     ThreadNotFoundError,
     UserNotFoundError,
@@ -199,32 +206,10 @@ def one_shot():
                   type: string
     """
     try:
-        data = request.get_json(force=True)
-
-        message = str(data.get("message", "")).strip()
-        thread_id = str(data.get("thread_id", "")).strip()
-        user_id = str(data.get("user_id", "")).strip()
-
-        if not message:
-            return jsonify({
-                "status": "error",
-                "message": "The 'message' field is required.",
-                "data": None,
-            }), 400
-
-        if not thread_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'thread_id' field is required.",
-                "data": None,
-            }), 400
-
-        if not user_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'user_id' field is required.",
-                "data": None,
-            }), 400
+        payload = read_chat_request_payload(request)
+        message = payload.message
+        thread_id = payload.thread_id
+        user_id = payload.user_id
 
         validate_user_id(user_id)
 
@@ -514,32 +499,10 @@ def stream():
                   type: string
     """
     try:
-        data = request.get_json(force=True)
-
-        message = str(data.get("message", "")).strip()
-        thread_id = str(data.get("thread_id", "")).strip()
-        user_id = str(data.get("user_id", "")).strip()
-
-        if not message:
-            return jsonify({
-                "status": "error",
-                "message": "The 'message' field is required.",
-                "data": None,
-            }), 400
-
-        if not thread_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'thread_id' field is required.",
-                "data": None,
-            }), 400
-
-        if not user_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'user_id' field is required.",
-                "data": None,
-            }), 400
+        payload = read_chat_request_payload(request)
+        message = payload.message
+        thread_id = payload.thread_id
+        user_id = payload.user_id
 
         validate_user_id(user_id)
 
@@ -663,33 +626,10 @@ def chat_stream_start():
         description: The server failed to create the streaming task.
     """
     try:
-        data = request.get_json(force=True)
-
-        message = str(data.get("message", "")).strip()
-        thread_id = str(data.get("thread_id", "")).strip()
-        user_id = str(data.get("user_id", "")).strip()
-        
-
-        if not message:
-            return jsonify({
-                "status": "error",
-                "message": "The 'message' field is required.",
-                "data": None,
-            }), 400
-
-        if not thread_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'thread_id' field is required.",
-                "data": None,
-            }), 400
-
-        if not user_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'user_id' field is required.",
-                "data": None,
-            }), 400
+        payload = read_chat_request_payload(request)
+        message = payload.message
+        thread_id = payload.thread_id
+        user_id = payload.user_id
 
         validate_user_id(user_id)
 
@@ -1145,17 +1085,11 @@ def threads():
               example: null
     """
     try:
-        user_id = request.args.get("user_id", "").strip()
-
-        if not user_id:
-            return jsonify({
-                "status": False,
-                "message": "The 'user_id' query parameter is required.",
-                "data": None,
-            }), 400
-
-        page = request.args.get("page", 1, type=int)
-        per_page = request.args.get("per_page", 20, type=int)
+        user_id = require_query_param(request.args.get("user_id"), "user_id")
+        page, per_page = parse_pagination(
+            request.args.get("page"),
+            request.args.get("per_page"),
+        )
 
         result = get_all_threads(user_id, page=page, per_page=per_page)
         total = result["total"]
@@ -1164,11 +1098,7 @@ def threads():
             "status": True,
             "message": "Threads fetched successfully.",
             "data": result["items"],
-            "metaData": {
-                "pagesCount": math.ceil(total / per_page) if per_page else 1,
-                "currentPage": page,
-                "offset": per_page,
-            },
+            "metaData": build_pagination_metadata(total, page, per_page),
         }), 200
 
     except ValueError as e:
@@ -1326,17 +1256,11 @@ def thread_history(thread_id):
               example: null
     """
     try:
-        user_id = request.args.get("user_id", "").strip()
-
-        if not user_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'user_id' query parameter is required.",
-                "data": None,
-            }), 400
-
-        page = request.args.get("page", 1, type=int)
-        per_page = request.args.get("per_page", 20, type=int)
+        user_id = require_query_param(request.args.get("user_id"), "user_id")
+        page, per_page = parse_pagination(
+            request.args.get("page"),
+            request.args.get("per_page"),
+        )
 
         result = get_thread_history(thread_id, user_id, page=page, per_page=per_page)
         total = result["total"]
@@ -1345,11 +1269,7 @@ def thread_history(thread_id):
             "status": "success",
             "message": "Thread history fetched successfully.",
             "data": result["items"],
-            "metaData": {
-                "pagesCount": math.ceil(total / per_page) if per_page else 1,
-                "currentPage": page,
-                "offset": per_page,
-            },
+            "metaData": build_pagination_metadata(total, page, per_page),
         }), 200
 
     except UserNotFoundError:
