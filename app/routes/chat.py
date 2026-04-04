@@ -4,6 +4,7 @@ All routes are mounted under ``/api/v1/chat`` by the application factory.
 """
 
 import json
+import time
 import uuid
 
 from celery.result import AsyncResult
@@ -25,7 +26,6 @@ from app.services.agent import (
     run_agent_stream,
     validate_user_id,
 )
-
 from app.services.stream_service import (
     compare_stream_event_ids,
     get_redis,
@@ -48,6 +48,10 @@ logger = get_logger("web", __name__)
 redis_logger = get_logger("redis", __name__)
 
 chat_bp = Blueprint("chat", __name__)
+
+# Maximum number of seconds a streaming SSE connection is kept alive.
+# After this deadline the server closes the connection with a timeout error event.
+STREAM_MAX_LIFETIME_SECONDS = 300  # 5 minutes
 
 
 @chat_bp.route("/", methods=["GET"])
@@ -276,6 +280,7 @@ def one_shot():
             },
         }), 500
 
+
 @chat_bp.route("/tasks/<task_id>", methods=["GET"])
 def task_status(task_id):
     """Poll the status of an asynchronous chat task.
@@ -416,6 +421,7 @@ def task_status(task_id):
                 "data": {"details": str(e)},
             }
         ), 500
+
 
 @chat_bp.route("/stream", methods=["POST"])
 def stream():
@@ -581,7 +587,6 @@ def stream():
         }), 500
 
 
-
 @chat_bp.route("/stream/start", methods=["POST"])
 def chat_stream_start():
     """Create an asynchronous streaming chat run.
@@ -720,6 +725,11 @@ def chat_stream_events(run_id):
       Opens a Server-Sent Events stream for the specified run. Clients can
       reconnect by sending ``Last-Event-ID`` or the ``last_event_id`` query
       parameter to resume from the last processed event.
+
+      The connection is automatically closed after
+      ``STREAM_MAX_LIFETIME_SECONDS`` seconds (default 300) even if no
+      terminal event has been received, and a ``timeout`` SSE event is
+      emitted before closing.
     produces:
       - text/event-stream
     parameters:
@@ -800,18 +810,51 @@ def chat_stream_events(run_id):
     def generate():
         with logging_context(request_id=request_id, service_name="web"):
             current_id = last_event_id
+            # Record the wall-clock deadline for this connection.
+            deadline = time.monotonic() + STREAM_MAX_LIFETIME_SECONDS
+
             redis_logger.info(
-                "Redis stream subscription opened run_id=%s last_event_id=%s",
+                "Redis stream subscription opened run_id=%s last_event_id=%s deadline_seconds=%s",
                 run_id,
                 last_event_id,
+                STREAM_MAX_LIFETIME_SECONDS,
             )
             yield ": connected\n\n"
 
             try:
                 while True:
-                    events = redis.xread({key: current_id}, block=30000, count=20)
+                    #  Hard timeout check 
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        redis_logger.warning(
+                            "Redis stream subscription timed out run_id=%s current_id=%s "
+                            "limit_seconds=%s",
+                            run_id,
+                            current_id,
+                            STREAM_MAX_LIFETIME_SECONDS,
+                        )
+                        yield format_sse(
+                            "timeout",
+                            {
+                                "run_id": run_id,
+                                "message": (
+                                    f"Stream connection closed after "
+                                    f"{STREAM_MAX_LIFETIME_SECONDS}s. "
+                                    "Reconnect to resume."
+                                ),
+                                "request_id": request_id,
+                            },
+                        )
+                        return
+
+                    # Cap the Redis block time so we re-check the deadline at
+                    # least once per 30-second window even when idle.
+                    block_ms = min(30000, int(remaining * 1_000))
+
+                    events = redis.xread({key: current_id}, block=block_ms, count=20)
 
                     if not events:
+                        #  Timeout on this xread window
                         redis_logger.debug(
                             "Redis stream read timeout run_id=%s current_id=%s",
                             run_id,
@@ -850,6 +893,7 @@ def chat_stream_events(run_id):
                         yield ": keepalive\n\n"
                         continue
 
+                    #  Deliver received events 
                     for _, messages in events:
                         redis_logger.debug(
                             "Redis stream batch received run_id=%s count=%s",
@@ -869,12 +913,14 @@ def chat_stream_events(run_id):
 
                             if event_type in {"done", "error", "cancelled"}:
                                 redis_logger.info(
-                                    "Redis stream terminal event delivered run_id=%s event_type=%s event_id=%s",
+                                    "Redis stream terminal event delivered run_id=%s "
+                                    "event_type=%s event_id=%s",
                                     run_id,
                                     event_type,
                                     msg_id,
                                 )
                                 return
+
             except Exception:
                 redis_logger.exception("Redis stream subscription failed run_id=%s", run_id)
                 raise
@@ -991,6 +1037,7 @@ def chat_stream_status(run_id):
             "message": "Failed to fetch run status.",
             "data": {"details": str(e)},
         }), 500
+
 
 @chat_bp.route("/threads", methods=["GET"])
 def threads():
@@ -1304,4 +1351,3 @@ def thread_history(thread_id):
             "message": "Failed to fetch thread history.",
             "data": None,
         }), 500
-
