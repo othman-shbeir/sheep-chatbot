@@ -1,4 +1,5 @@
 import uuid
+import time
 from functools import lru_cache
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -18,6 +19,15 @@ from app.utils import extract_stream_text_content, extract_text_content
 from app.core.logging_config import get_logger
 
 logger = get_logger("system", __name__)
+
+_TRANSIENT_PROVIDER_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+_TRANSIENT_PROVIDER_ERROR_MARKERS = (
+    "UNAVAILABLE",
+    "RESOURCE_EXHAUSTED",
+    "HIGH DEMAND",
+    "TRY AGAIN LATER",
+)
+_MODEL_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)
 
 SYSTEM_PROMPT = """
 You are a helpful, warm, and knowledgeable AI assistant.
@@ -281,6 +291,90 @@ def maybe_compact_thread(
         session.commit()
 
 
+def _extract_provider_error_details(exc: Exception) -> tuple[int | None, str, str]:
+    """Return provider error details used to decide whether a retry is safe."""
+    status_code = getattr(exc, "status_code", None)
+    status = ""
+    message = str(exc)
+
+    response_json = getattr(exc, "response_json", None)
+    if isinstance(response_json, dict):
+        error_payload = response_json.get("error", response_json)
+        if isinstance(error_payload, dict):
+            if status_code is None and isinstance(error_payload.get("code"), int):
+                status_code = error_payload["code"]
+            if error_payload.get("status"):
+                status = str(error_payload["status"]).upper()
+            if error_payload.get("message"):
+                message = str(error_payload["message"])
+
+    return status_code, status, message
+
+
+def _is_retryable_provider_error(exc: Exception) -> bool:
+    """Return ``True`` when the provider failure looks transient."""
+    status_code, status, message = _extract_provider_error_details(exc)
+    if status_code in _TRANSIENT_PROVIDER_STATUS_CODES:
+        return True
+
+    normalized = f"{status} {message}".upper()
+    return any(marker in normalized for marker in _TRANSIENT_PROVIDER_ERROR_MARKERS)
+
+
+def _invoke_model_with_retry(context_messages):
+    """Invoke the model with bounded retries for transient provider failures."""
+    for attempt_index in range(len(_MODEL_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            return get_model_with_search().invoke(context_messages)
+        except Exception as exc:
+            if (
+                not _is_retryable_provider_error(exc)
+                or attempt_index >= len(_MODEL_RETRY_DELAYS_SECONDS)
+            ):
+                raise
+
+            delay = _MODEL_RETRY_DELAYS_SECONDS[attempt_index]
+            logger.warning(
+                "Transient provider failure during invoke. Retrying attempt=%s delay_seconds=%s error=%s",
+                attempt_index + 2,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+
+    raise RuntimeError("Model invocation retry loop exited unexpectedly.")
+
+
+def _stream_model_with_retry(context_messages):
+    """Stream model chunks, retrying only when failure happens before the first token."""
+    for attempt_index in range(len(_MODEL_RETRY_DELAYS_SECONDS) + 1):
+        yielded_any_chunk = False
+
+        try:
+            for chunk in get_model_with_search().stream(context_messages):
+                yielded_any_chunk = True
+                yield chunk
+            return
+        except Exception as exc:
+            if (
+                yielded_any_chunk
+                or not _is_retryable_provider_error(exc)
+                or attempt_index >= len(_MODEL_RETRY_DELAYS_SECONDS)
+            ):
+                raise
+
+            delay = _MODEL_RETRY_DELAYS_SECONDS[attempt_index]
+            logger.warning(
+                "Transient provider failure before first streamed token. Retrying attempt=%s delay_seconds=%s error=%s",
+                attempt_index + 2,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+
+    raise RuntimeError("Model stream retry loop exited unexpectedly.")
+
+
 def run_agent(
     user_input: str,
     thread_id: str,
@@ -294,7 +388,7 @@ def run_agent(
     )
 
     context_messages = build_context_messages(thread_id)
-    response = get_model_with_search().invoke(context_messages)
+    response = _invoke_model_with_retry(context_messages)
     assistant_text = extract_text_content(response)
 
     _store_assistant_message(thread_id, assistant_text)
@@ -318,7 +412,7 @@ def run_agent_stream(
     context_messages = build_context_messages(thread_id)
 
     assistant_parts: list[str] = []
-    for chunk in get_model_with_search().stream(context_messages):
+    for chunk in _stream_model_with_retry(context_messages):
         delta = extract_stream_text_content(chunk)
         if not delta:
             continue
