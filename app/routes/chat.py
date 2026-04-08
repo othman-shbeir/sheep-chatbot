@@ -3,13 +3,21 @@
 All routes are mounted under ``/api/v1/chat`` by the application factory.
 """
 
-import math
 import json
+import time
 import uuid
-from flask import Blueprint, Response, jsonify, render_template, request, url_for
+
 from celery.result import AsyncResult
+from flask import Blueprint, Response, jsonify, render_template, request, url_for
+
 from app.celery_app import celery_app
 from app.core.logging_config import get_logger, get_request_id, logging_context
+from app.routes.chat_helpers import (
+    build_pagination_metadata,
+    parse_pagination,
+    read_chat_request_payload,
+    require_query_param,
+)
 from app.services.agent import (
     ThreadNotFoundError,
     UserNotFoundError,
@@ -18,7 +26,6 @@ from app.services.agent import (
     run_agent_stream,
     validate_user_id,
 )
-
 from app.services.stream_service import (
     compare_stream_event_ids,
     get_redis,
@@ -41,6 +48,10 @@ logger = get_logger("web", __name__)
 redis_logger = get_logger("redis", __name__)
 
 chat_bp = Blueprint("chat", __name__)
+
+# Maximum number of seconds a streaming SSE connection is kept alive.
+# After this deadline the server closes the connection with a timeout error event.
+STREAM_MAX_LIFETIME_SECONDS = 300  # 5 minutes
 
 
 @chat_bp.route("/", methods=["GET"])
@@ -199,32 +210,10 @@ def one_shot():
                   type: string
     """
     try:
-        data = request.get_json(force=True)
-
-        message = str(data.get("message", "")).strip()
-        thread_id = str(data.get("thread_id", "")).strip()
-        user_id = str(data.get("user_id", "")).strip()
-
-        if not message:
-            return jsonify({
-                "status": "error",
-                "message": "The 'message' field is required.",
-                "data": None,
-            }), 400
-
-        if not thread_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'thread_id' field is required.",
-                "data": None,
-            }), 400
-
-        if not user_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'user_id' field is required.",
-                "data": None,
-            }), 400
+        payload = read_chat_request_payload(request)
+        message = payload.message
+        thread_id = payload.thread_id
+        user_id = payload.user_id
 
         validate_user_id(user_id)
 
@@ -290,6 +279,7 @@ def one_shot():
                 "details": str(e),
             },
         }), 500
+
 
 @chat_bp.route("/tasks/<task_id>", methods=["GET"])
 def task_status(task_id):
@@ -432,6 +422,7 @@ def task_status(task_id):
             }
         ), 500
 
+
 @chat_bp.route("/stream", methods=["POST"])
 def stream():
     """Stream a chat response via Server-Sent Events (SSE).
@@ -514,32 +505,10 @@ def stream():
                   type: string
     """
     try:
-        data = request.get_json(force=True)
-
-        message = str(data.get("message", "")).strip()
-        thread_id = str(data.get("thread_id", "")).strip()
-        user_id = str(data.get("user_id", "")).strip()
-
-        if not message:
-            return jsonify({
-                "status": "error",
-                "message": "The 'message' field is required.",
-                "data": None,
-            }), 400
-
-        if not thread_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'thread_id' field is required.",
-                "data": None,
-            }), 400
-
-        if not user_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'user_id' field is required.",
-                "data": None,
-            }), 400
+        payload = read_chat_request_payload(request)
+        message = payload.message
+        thread_id = payload.thread_id
+        user_id = payload.user_id
 
         validate_user_id(user_id)
 
@@ -618,7 +587,6 @@ def stream():
         }), 500
 
 
-
 @chat_bp.route("/stream/start", methods=["POST"])
 def chat_stream_start():
     """Create an asynchronous streaming chat run.
@@ -663,33 +631,10 @@ def chat_stream_start():
         description: The server failed to create the streaming task.
     """
     try:
-        data = request.get_json(force=True)
-
-        message = str(data.get("message", "")).strip()
-        thread_id = str(data.get("thread_id", "")).strip()
-        user_id = str(data.get("user_id", "")).strip()
-        
-
-        if not message:
-            return jsonify({
-                "status": "error",
-                "message": "The 'message' field is required.",
-                "data": None,
-            }), 400
-
-        if not thread_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'thread_id' field is required.",
-                "data": None,
-            }), 400
-
-        if not user_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'user_id' field is required.",
-                "data": None,
-            }), 400
+        payload = read_chat_request_payload(request)
+        message = payload.message
+        thread_id = payload.thread_id
+        user_id = payload.user_id
 
         validate_user_id(user_id)
 
@@ -780,6 +725,11 @@ def chat_stream_events(run_id):
       Opens a Server-Sent Events stream for the specified run. Clients can
       reconnect by sending ``Last-Event-ID`` or the ``last_event_id`` query
       parameter to resume from the last processed event.
+
+      The connection is automatically closed after
+      ``STREAM_MAX_LIFETIME_SECONDS`` seconds (default 300) even if no
+      terminal event has been received, and a ``timeout`` SSE event is
+      emitted before closing.
     produces:
       - text/event-stream
     parameters:
@@ -860,18 +810,51 @@ def chat_stream_events(run_id):
     def generate():
         with logging_context(request_id=request_id, service_name="web"):
             current_id = last_event_id
+            # Record the wall-clock deadline for this connection.
+            deadline = time.monotonic() + STREAM_MAX_LIFETIME_SECONDS
+
             redis_logger.info(
-                "Redis stream subscription opened run_id=%s last_event_id=%s",
+                "Redis stream subscription opened run_id=%s last_event_id=%s deadline_seconds=%s",
                 run_id,
                 last_event_id,
+                STREAM_MAX_LIFETIME_SECONDS,
             )
             yield ": connected\n\n"
 
             try:
                 while True:
-                    events = redis.xread({key: current_id}, block=30000, count=20)
+                    #  Hard timeout check 
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        redis_logger.warning(
+                            "Redis stream subscription timed out run_id=%s current_id=%s "
+                            "limit_seconds=%s",
+                            run_id,
+                            current_id,
+                            STREAM_MAX_LIFETIME_SECONDS,
+                        )
+                        yield format_sse(
+                            "timeout",
+                            {
+                                "run_id": run_id,
+                                "message": (
+                                    f"Stream connection closed after "
+                                    f"{STREAM_MAX_LIFETIME_SECONDS}s. "
+                                    "Reconnect to resume."
+                                ),
+                                "request_id": request_id,
+                            },
+                        )
+                        return
+
+                    # Cap the Redis block time so we re-check the deadline at
+                    # least once per 30-second window even when idle.
+                    block_ms = min(30000, int(remaining * 1_000))
+
+                    events = redis.xread({key: current_id}, block=block_ms, count=20)
 
                     if not events:
+                        #  Timeout on this xread window
                         redis_logger.debug(
                             "Redis stream read timeout run_id=%s current_id=%s",
                             run_id,
@@ -910,6 +893,7 @@ def chat_stream_events(run_id):
                         yield ": keepalive\n\n"
                         continue
 
+                    #  Deliver received events 
                     for _, messages in events:
                         redis_logger.debug(
                             "Redis stream batch received run_id=%s count=%s",
@@ -929,12 +913,14 @@ def chat_stream_events(run_id):
 
                             if event_type in {"done", "error", "cancelled"}:
                                 redis_logger.info(
-                                    "Redis stream terminal event delivered run_id=%s event_type=%s event_id=%s",
+                                    "Redis stream terminal event delivered run_id=%s "
+                                    "event_type=%s event_id=%s",
                                     run_id,
                                     event_type,
                                     msg_id,
                                 )
                                 return
+
             except Exception:
                 redis_logger.exception("Redis stream subscription failed run_id=%s", run_id)
                 raise
@@ -1052,6 +1038,7 @@ def chat_stream_status(run_id):
             "data": {"details": str(e)},
         }), 500
 
+
 @chat_bp.route("/threads", methods=["GET"])
 def threads():
     """List all conversation threads for a user (paginated).
@@ -1145,17 +1132,11 @@ def threads():
               example: null
     """
     try:
-        user_id = request.args.get("user_id", "").strip()
-
-        if not user_id:
-            return jsonify({
-                "status": False,
-                "message": "The 'user_id' query parameter is required.",
-                "data": None,
-            }), 400
-
-        page = request.args.get("page", 1, type=int)
-        per_page = request.args.get("per_page", 20, type=int)
+        user_id = require_query_param(request.args.get("user_id"), "user_id")
+        page, per_page = parse_pagination(
+            request.args.get("page"),
+            request.args.get("per_page"),
+        )
 
         result = get_all_threads(user_id, page=page, per_page=per_page)
         total = result["total"]
@@ -1164,11 +1145,7 @@ def threads():
             "status": True,
             "message": "Threads fetched successfully.",
             "data": result["items"],
-            "metaData": {
-                "pagesCount": math.ceil(total / per_page) if per_page else 1,
-                "currentPage": page,
-                "offset": per_page,
-            },
+            "metaData": build_pagination_metadata(total, page, per_page),
         }), 200
 
     except ValueError as e:
@@ -1326,17 +1303,11 @@ def thread_history(thread_id):
               example: null
     """
     try:
-        user_id = request.args.get("user_id", "").strip()
-
-        if not user_id:
-            return jsonify({
-                "status": "error",
-                "message": "The 'user_id' query parameter is required.",
-                "data": None,
-            }), 400
-
-        page = request.args.get("page", 1, type=int)
-        per_page = request.args.get("per_page", 20, type=int)
+        user_id = require_query_param(request.args.get("user_id"), "user_id")
+        page, per_page = parse_pagination(
+            request.args.get("page"),
+            request.args.get("per_page"),
+        )
 
         result = get_thread_history(thread_id, user_id, page=page, per_page=per_page)
         total = result["total"]
@@ -1345,11 +1316,7 @@ def thread_history(thread_id):
             "status": "success",
             "message": "Thread history fetched successfully.",
             "data": result["items"],
-            "metaData": {
-                "pagesCount": math.ceil(total / per_page) if per_page else 1,
-                "currentPage": page,
-                "offset": per_page,
-            },
+            "metaData": build_pagination_metadata(total, page, per_page),
         }), 200
 
     except UserNotFoundError:
@@ -1384,4 +1351,3 @@ def thread_history(thread_id):
             "message": "Failed to fetch thread history.",
             "data": None,
         }), 500
-
