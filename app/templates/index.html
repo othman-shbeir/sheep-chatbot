@@ -5,23 +5,18 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Livestock AI Assistant</title>
-    <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <!-- Highlight.js for Code Blocks (Optional depending on output) -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=2">
 </head>
 
 <body>
-
-    <!-- Animated Background Mesh Elements -->
     <div class="mesh-bg mesh-bg-1"></div>
     <div class="mesh-bg mesh-bg-2"></div>
 
     <div class="app-layout">
-        <!-- Sidebar for Conversation History -->
         <aside class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <h2>Conversations</h2>
@@ -33,13 +28,10 @@
                     <line x1="5" y1="12" x2="19" y2="12"></line>
                 </svg>
             </button>
-            <ul class="thread-list" id="threadList">
-                <!-- Thread items populated by JS -->
-            </ul>
+            <ul class="thread-list" id="threadList"></ul>
         </aside>
 
         <div class="chat-container">
-            <!-- Header -->
             <header class="chat-header">
                 <button class="menu-toggle-btn" aria-label="Toggle Sidebar" onclick="toggleSidebar()">
                     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
@@ -55,34 +47,32 @@
                 </div>
                 <div class="header-info">
                     <h1>AI Assistant</h1>
-                    <p></p>
+                    <p>Use a backend user ID (UUID) to load history and send messages.</p>
                 </div>
                 <div class="header-controls">
-                    <div class="email-wrap">
-                        <input id="userEmail" type="email" inputmode="email" autocomplete="email"
-                            placeholder="Email" aria-label="User email" />
+                    <div class="user-id-wrap">
+                        <input id="userId" type="text" inputmode="text" autocomplete="off" autocapitalize="off"
+                            spellcheck="false" placeholder="User ID (UUID)" aria-label="Backend user ID" />
                     </div>
-                    <label class="stream-toggle" title="Toggle streaming responses">
+                    <label class="stream-toggle" title="Toggle async streaming responses">
                         <input id="streamToggle" type="checkbox" />
                         <span class="toggle-ui" aria-hidden="true"></span>
-                        <span class="toggle-label">Stream</span>
+                        <span class="toggle-label">Async Stream</span>
                     </label>
                 </div>
             </header>
 
-            <!-- Message List -->
             <main class="chat-body" id="chatWindow">
-                <div class="message assistant-message intro-msg" dir="rtl">
+                <div class="message assistant-message intro-msg" dir="auto">
                     <div class="message-content">
-                        <p>مرحباً! أنا مساعدك الذكي، كيف يمكنني مساعدتك اليوم؟</p>
+                        <p>Hello. I am your livestock AI assistant. Enter a backend user ID to load history, then start chatting.</p>
                     </div>
                 </div>
             </main>
 
-            <!-- Input Area -->
             <footer class="chat-footer">
                 <div class="input-wrapper">
-                    <textarea id="userInput" dir="auto" placeholder="اكتب رسالتك هنا..."></textarea>
+                    <textarea id="userInput" dir="auto" placeholder="Write your message here..."></textarea>
                     <button id="sendBtn" class="send-btn" aria-label="Send Message">
                         <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
                             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
