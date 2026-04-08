@@ -10,9 +10,7 @@ except ImportError:
     from session import load_thread_id, reset_thread_id
     from stream_client import StreamError, send_message
 
-# ---------------------------------------------------------------------------
-# ANSI colour helpers (gracefully disabled on terminals that don't support it)
-# ---------------------------------------------------------------------------
+# ANSI colour helpers
 
 def _cyan(text: str) -> str:
     return f"\033[96m{text}\033[0m"
@@ -27,10 +25,7 @@ def _dim(text: str) -> str:
     return f"\033[2m{text}\033[0m"
 
 
-# ---------------------------------------------------------------------------
 # Command handlers
-# ---------------------------------------------------------------------------
-
 def _handle_slash_command(command: str, thread_id: str) -> str:
     """Handle /commands entered by the user. Returns the (possibly new) thread_id."""
     cmd = command.strip().lower()
@@ -57,10 +52,7 @@ def _handle_slash_command(command: str, thread_id: str) -> str:
     return thread_id
 
 
-# ---------------------------------------------------------------------------
 # Main loop
-# ---------------------------------------------------------------------------
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sheep Chatbot CLI")
     parser.add_argument(
@@ -70,7 +62,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # ── Startup ──────────────────────────────────────────────────────────
+    #  Startup 
     thread_id = load_thread_id()
 
     if args.reset:
@@ -79,7 +71,7 @@ def main() -> None:
         sys.exit(0)
 
     print(_cyan("=" * 52))
-    print(_cyan("   🐑  Sheep Chatbot CLI"))
+    print(_cyan("      Sheep Chatbot CLI"))
     print(_cyan("=" * 52))
     print(_dim(f"   API:      {BASE_URL}"))
     print(_dim(f"   User:     {USER_ID}"))
@@ -88,10 +80,10 @@ def main() -> None:
     print(_cyan("=" * 52))
     print()
 
-    # ── Input loop ───────────────────────────────────────────────────────
+    #  Input loop 
     while True:
         try:
-            user_input = input(_cyan("You: ")).strip()
+            user_input = input(_cyan("User: ")).strip()
         except (KeyboardInterrupt, EOFError):
             # Ctrl+C or Ctrl+D — exit cleanly.
             print()
@@ -112,7 +104,7 @@ def main() -> None:
             thread_id = _handle_slash_command(user_input, thread_id)
             continue
 
-        # ── Send message to API ──────────────────────────────────────────
+        # Send message to API 
         try:
             send_message(
                 message=user_input,
