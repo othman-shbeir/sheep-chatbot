@@ -1,7 +1,6 @@
 import os
 import uuid
 
-# Path to the local session file in the user's home directory.
 _SESSION_FILE = os.path.expanduser("~/.sheep_chat")
 
 
@@ -12,7 +11,7 @@ def load_thread_id() -> str:
         if thread_id:
             return thread_id
 
-    # No valid session found — generate a fresh thread_id.
+    # No valid session found, generate a fresh thread_id.
     return _create_new_session()
 
 
@@ -34,7 +33,7 @@ def _read_session_file() -> str | None:
         return thread_id
 
     except (ValueError, OSError):
-        # File is corrupted or unreadable — treat as missing.
+        # File is corrupted or unreadable, treat as missing.
         return None
 
 
@@ -51,5 +50,5 @@ def _write_session_file(thread_id: str) -> None:
         with open(_SESSION_FILE, "w", encoding="utf-8") as f:
             f.write(thread_id)
     except OSError as e:
-        # Non-fatal — the CLI still works, just won't persist across runs.
+        # Non-fatal: the CLI still works, just won't persist across runs.
         print(f"[warning] Could not save session file: {e}")

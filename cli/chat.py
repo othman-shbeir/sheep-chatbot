@@ -85,7 +85,7 @@ def main() -> None:
         try:
             user_input = input(_cyan("User: ")).strip()
         except (KeyboardInterrupt, EOFError):
-            # Ctrl+C or Ctrl+D — exit cleanly.
+            # Ctrl+C: exit cleanly.
             print()
             print(_yellow("Goodbye!"))
             sys.exit(0)
