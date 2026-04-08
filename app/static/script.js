@@ -1,93 +1,90 @@
 const chatWindow = document.getElementById('chatWindow');
 const userInput = document.getElementById('userInput');
 const sendBtn = document.getElementById('sendBtn');
-const userEmailInput = document.getElementById('userEmail');
+const userIdInput = document.getElementById('userId');
 const streamToggle = document.getElementById('streamToggle');
 
-// Initialize markdown parser options
-marked.setOptions({
-    breaks: true,
-    gfm: true,
-    headerIds: false
-});
-
-// Auto-detect text direction (RTL for Arabic/Hebrew, LTR otherwise)
-function detectDir(text) {
-    const rtlRegex = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF\u0590-\u05FF]/;
-    const trimmed = (text || '').trim();
-    return rtlRegex.test(trimmed.charAt(0)) ? 'rtl' : 'ltr';
-}
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const LS_USER_ID = 'sheep_ui_user_id';
+const LS_USE_STREAMING = 'sheep_ui_use_streaming';
+const MAX_STREAM_RECONNECTS = 3;
+const INTRO_MSG = `
+    <div class="message assistant-message intro-msg" dir="auto">
+        <div class="message-content">
+            <p>Hello. I am your livestock AI assistant. Enter a backend user ID to load history, then start chatting.</p>
+        </div>
+    </div>`;
 
 let currentThreadId = null;
 let allThreads = [];
 let useStreaming = false;
+let threadListNotice = 'Enter a backend user ID to load conversations.';
 
-const LS_USER_EMAIL = 'sheep_ui_user_email';
-const LS_USE_STREAMING = 'sheep_ui_use_streaming';
-
-const INTRO_MSG = `
-    <div class="message assistant-message intro-msg" dir="rtl">
-        <div class="message-content">
-            <p>مرحباً! أنا مساعدك الذكي. كيف يمكنني مساعدتك اليوم؟</p>
-        </div>
-    </div>`;
-
-// Initialize on page load
-window.addEventListener('DOMContentLoaded', async () => {
-    // Restore UI state
-    const savedEmail = localStorage.getItem(LS_USER_EMAIL);
-    if (savedEmail && userEmailInput) userEmailInput.value = savedEmail;
-
-    const savedStreaming = localStorage.getItem(LS_USE_STREAMING);
-    useStreaming = savedStreaming === 'true';
-    if (streamToggle) streamToggle.checked = useStreaming;
-
-    if (userEmailInput) {
-        userEmailInput.addEventListener('change', () => {
-            localStorage.setItem(LS_USER_EMAIL, userEmailInput.value.trim());
-        });
-    }
-    if (streamToggle) {
-        streamToggle.addEventListener('change', () => {
-            useStreaming = !!streamToggle.checked;
-            localStorage.setItem(LS_USE_STREAMING, String(useStreaming));
-        });
-    }
-
-    await fetchThreads();  // load history first
-    startNewThread();      // then show fresh chat
-});
-
-//  Sidebar toggle (mobile) 
-function toggleSidebar() {
-    document.getElementById('sidebar').classList.toggle('open');
+if (window.marked?.setOptions) {
+    window.marked.setOptions({
+        breaks: true,
+        gfm: true,
+        headerIds: false
+    });
 }
 
-//  New Chat
-function startNewThread() {
-    // Generate a fresh thread ID for the new conversation
-    currentThreadId = "ui_sess_" + Math.random().toString(36).substring(2, 9);
-
-    // Show the welcome message in the chat window
-    chatWindow.innerHTML = INTRO_MSG;
-    userInput.focus();
-
-    // Highlight active thread in sidebar (none will match since this one
-    // hasn't been sent to the server yet — that's intentional)
-    renderThreadList();
-
-    // Close sidebar on mobile
-    if (window.innerWidth <= 768) {
-        document.getElementById('sidebar').classList.remove('open');
-    }
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
-//  DOM helpers 
+function renderMarkdown(text) {
+    const safeText = escapeHtml(text);
+    if (window.marked?.parse) {
+        return window.marked.parse(safeText);
+    }
+
+    return `<p>${safeText.replace(/\n/g, '<br>')}</p>`;
+}
+
+function detectDir(text) {
+    const rtlRegex = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF\u0590-\u05FF]/;
+    const trimmed = String(text ?? '').trim();
+    return rtlRegex.test(trimmed.charAt(0)) ? 'rtl' : 'ltr';
+}
+
+function getUserId() {
+    return (userIdInput?.value || '').trim();
+}
+
+function isValidUserId(userId = getUserId()) {
+    return UUID_PATTERN.test(userId);
+}
+
+function generateThreadId() {
+    if (window.crypto?.randomUUID) {
+        return window.crypto.randomUUID();
+    }
+
+    return `ui-thread-${Math.random().toString(36).slice(2, 11)}`;
+}
+
+function sleep(ms) {
+    return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
+function getErrorMessage(payload, fallback) {
+    if (payload?.data?.error) return String(payload.data.error);
+    if (payload?.data?.details) return String(payload.data.details);
+    if (payload?.message) return String(payload.message);
+    if (payload?.raw) return String(payload.raw);
+    return fallback;
+}
+
 function appendUserMessage(text) {
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message user-message';
     msgDiv.setAttribute('dir', detectDir(text));
-    msgDiv.innerHTML = `<div class="message-content">${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
+    msgDiv.innerHTML = `<div class="message-content">${escapeHtml(text).replace(/\n/g, '<br>')}</div>`;
     chatWindow.appendChild(msgDiv);
     chatWindow.scrollTop = chatWindow.scrollHeight;
 }
@@ -96,7 +93,7 @@ function appendBotMessage(markdownText) {
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message assistant-message';
     msgDiv.setAttribute('dir', detectDir(markdownText));
-    msgDiv.innerHTML = `<div class="message-content">${marked.parse(markdownText)}</div>`;
+    msgDiv.innerHTML = `<div class="message-content">${renderMarkdown(markdownText)}</div>`;
     chatWindow.appendChild(msgDiv);
     chatWindow.scrollTop = chatWindow.scrollHeight;
 }
@@ -105,7 +102,7 @@ function createBotMessageBubble(initialText = '') {
     const msgDiv = document.createElement('div');
     msgDiv.className = 'message assistant-message';
     msgDiv.setAttribute('dir', detectDir(initialText));
-    msgDiv.innerHTML = `<div class="message-content">${marked.parse(initialText)}</div>`;
+    msgDiv.innerHTML = `<div class="message-content">${renderMarkdown(initialText)}</div>`;
     chatWindow.appendChild(msgDiv);
     chatWindow.scrollTop = chatWindow.scrollHeight;
     return msgDiv;
@@ -114,7 +111,9 @@ function createBotMessageBubble(initialText = '') {
 function updateBotMessageBubble(msgDiv, markdownText) {
     const content = msgDiv.querySelector('.message-content');
     msgDiv.setAttribute('dir', detectDir(markdownText));
-    if (content) content.innerHTML = marked.parse(markdownText);
+    if (content) {
+        content.innerHTML = renderMarkdown(markdownText);
+    }
     chatWindow.scrollTop = chatWindow.scrollHeight;
 }
 
@@ -124,7 +123,7 @@ function appendLoader() {
     loaderDiv.id = 'loadingIndicator';
     loaderDiv.innerHTML = `
         <div class="message-content loading">
-            <span class="loading-text">جاري البحث</span>
+            <span class="loading-text">Thinking</span>
             <div class="dot"></div>
             <div class="dot"></div>
             <div class="dot"></div>
@@ -135,34 +134,496 @@ function appendLoader() {
 
 function removeLoader() {
     const loader = document.getElementById('loadingIndicator');
-    if (loader) loader.remove();
+    if (loader) {
+        loader.remove();
+    }
 }
 
-// Auto-resize textarea 
-userInput.addEventListener('input', function () {
-    this.style.height = '48px';
-    this.style.height = Math.min(this.scrollHeight, 150) + 'px';
-});
+function renderThreadList() {
+    const list = document.getElementById('threadList');
+    list.innerHTML = '';
 
-// Submit on Enter (without Shift)
-userInput.addEventListener('keydown', function (e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendMessage();
+    if (!allThreads.length) {
+        const empty = document.createElement('li');
+        empty.className = 'thread-empty';
+        empty.textContent = threadListNotice;
+        list.appendChild(empty);
+        return;
     }
-});
 
-sendBtn.addEventListener('click', sendMessage);
+    allThreads.forEach(thread => {
+        const li = document.createElement('li');
+        const label = String(thread.title || thread.id || 'Untitled conversation');
 
-//  Send Message 
+        li.className = 'thread-item';
+        if (thread.id === currentThreadId) {
+            li.classList.add('active');
+        }
+
+        li.textContent = label;
+        li.title = label;
+        li.onclick = () => switchThread(thread.id);
+        list.appendChild(li);
+    });
+}
+
+function toggleSidebar() {
+    document.getElementById('sidebar').classList.toggle('open');
+}
+
+function startNewThread() {
+    currentThreadId = generateThreadId();
+    chatWindow.innerHTML = INTRO_MSG;
+    renderThreadList();
+    userInput.focus();
+
+    if (window.innerWidth <= 768) {
+        document.getElementById('sidebar').classList.remove('open');
+    }
+}
+
+async function refreshForCurrentUser() {
+    const userId = getUserId();
+    allThreads = [];
+
+    if (!userId) {
+        threadListNotice = 'Enter a backend user ID to load conversations.';
+        startNewThread();
+        return;
+    }
+
+    if (!isValidUserId(userId)) {
+        threadListNotice = 'Enter a valid UUID user ID to load conversations.';
+        startNewThread();
+        return;
+    }
+
+    threadListNotice = 'Loading conversations...';
+    startNewThread();
+    await fetchThreads();
+}
+
+async function fetchThreads() {
+    const userId = getUserId();
+
+    if (!userId) {
+        allThreads = [];
+        threadListNotice = 'Enter a backend user ID to load conversations.';
+        renderThreadList();
+        return;
+    }
+
+    if (!isValidUserId(userId)) {
+        allThreads = [];
+        threadListNotice = 'Enter a valid UUID user ID to load conversations.';
+        renderThreadList();
+        return;
+    }
+
+    try {
+        const res = await fetch(`/api/v1/chat/threads?user_id=${encodeURIComponent(userId)}`);
+        const json = await res.json().catch(() => null);
+
+        if (!res.ok || json?.status !== true) {
+            allThreads = [];
+            threadListNotice = getErrorMessage(json, 'Failed to load conversations.');
+            renderThreadList();
+            return;
+        }
+
+        allThreads = Array.isArray(json.data) ? json.data : [];
+        threadListNotice = allThreads.length ? '' : 'No previous conversations.';
+        renderThreadList();
+    } catch (error) {
+        allThreads = [];
+        threadListNotice = 'Failed to load conversations.';
+        renderThreadList();
+        console.error('Failed to fetch history:', error);
+    }
+}
+
+async function pollTaskResult(taskId, timeoutMs = 120000, intervalMs = 1000) {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+        await sleep(intervalMs);
+
+        const response = await fetch(`/api/v1/chat/tasks/${encodeURIComponent(taskId)}`);
+        const payload = await response.json().catch(() => null);
+        const state = payload?.data?.state;
+
+        if (state === 'SUCCESS') {
+            return payload?.data?.result?.assistant_message || '';
+        }
+
+        if (state === 'FAILURE') {
+            throw new Error(getErrorMessage(payload, 'The queued task failed.'));
+        }
+
+        if (!response.ok) {
+            throw new Error(getErrorMessage(payload, 'Failed to fetch task status.'));
+        }
+    }
+
+    throw new Error('Timed out waiting for the queued response.');
+}
+
+async function sendOneShotMessage(text, userId) {
+    const response = await fetch('/api/v1/chat/one-shot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            message: text,
+            thread_id: currentThreadId,
+            user_id: userId
+        })
+    });
+
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok || payload?.status !== 'accepted') {
+        throw new Error(getErrorMessage(payload, 'Failed to queue the message.'));
+    }
+
+    const taskId = payload?.data?.task_id;
+    if (!taskId) {
+        throw new Error('The server did not return a task ID.');
+    }
+
+    return pollTaskResult(taskId);
+}
+
+function buildEventsUrl(eventsUrl, lastEventId) {
+    if (!lastEventId || lastEventId === '0-0') {
+        return eventsUrl;
+    }
+
+    const separator = eventsUrl.includes('?') ? '&' : '?';
+    return `${eventsUrl}${separator}last_event_id=${encodeURIComponent(lastEventId)}`;
+}
+
+function parseSseFrame(frame) {
+    if (!frame || frame.startsWith(':')) {
+        return null;
+    }
+
+    const lines = frame.split('\n').map(line => line.trimEnd());
+    const dataLines = [];
+    let eventId = '';
+    let eventName = 'message';
+
+    for (const line of lines) {
+        if (line.startsWith('id:')) {
+            eventId = line.slice(3).trim();
+        } else if (line.startsWith('event:')) {
+            eventName = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trimStart());
+        }
+    }
+
+    if (!dataLines.length) {
+        return { eventId, eventName, payload: null };
+    }
+
+    const raw = dataLines.join('\n');
+
+    try {
+        return {
+            eventId,
+            eventName,
+            payload: JSON.parse(raw)
+        };
+    } catch {
+        return {
+            eventId,
+            eventName,
+            payload: { raw }
+        };
+    }
+}
+
+async function fetchRunState(statusUrl) {
+    if (!statusUrl) {
+        return null;
+    }
+
+    try {
+        const response = await fetch(statusUrl);
+        if (response.status === 404) {
+            return null;
+        }
+
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || payload?.status !== 'success') {
+            return null;
+        }
+
+        return payload?.data?.state || null;
+    } catch (error) {
+        console.error('Failed to fetch stream status:', error);
+        return null;
+    }
+}
+
+async function consumeAsyncStream(eventsUrl, statusUrl) {
+    let bubble = null;
+    let fullText = '';
+    let lastEventId = '0-0';
+    let reconnectCount = 0;
+
+    while (reconnectCount <= MAX_STREAM_RECONNECTS) {
+        let shouldReconnect = false;
+        const response = await fetch(buildEventsUrl(eventsUrl, lastEventId), {
+            headers: { Accept: 'text/event-stream' }
+        });
+
+        if (response.status === 204) {
+            removeLoader();
+            if (bubble && fullText) {
+                updateBotMessageBubble(
+                    bubble,
+                    `${fullText}\n\n**Warning**: The stream finished without a final completion event.`
+                );
+            }
+            return;
+        }
+
+        if (!response.ok || !response.body) {
+            const payload = await response.json().catch(() => null);
+            throw new Error(getErrorMessage(payload, 'Failed to connect to the async event stream.'));
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        let rafScheduled = false;
+
+        const ensureBubble = () => {
+            if (!bubble) {
+                bubble = createBotMessageBubble('');
+            }
+            return bubble;
+        };
+
+        const scheduleRender = () => {
+            if (rafScheduled || !bubble) {
+                return;
+            }
+
+            rafScheduled = true;
+            requestAnimationFrame(() => {
+                rafScheduled = false;
+                updateBotMessageBubble(bubble, fullText);
+            });
+        };
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+                break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            const frames = buffer.split('\n\n');
+            buffer = frames.pop() || '';
+
+            for (const frame of frames) {
+                const parsed = parseSseFrame(frame);
+                if (!parsed) {
+                    continue;
+                }
+
+                if (parsed.eventId) {
+                    lastEventId = parsed.eventId;
+                }
+
+                const payload = parsed.payload || {};
+
+                if (parsed.eventName === 'queued' || parsed.eventName === 'started') {
+                    continue;
+                }
+
+                if (parsed.eventName === 'delta') {
+                    removeLoader();
+                    ensureBubble();
+
+                    const delta = String(payload?.delta || '');
+                    if (delta) {
+                        fullText += delta;
+                        scheduleRender();
+                    }
+                    continue;
+                }
+
+                if (parsed.eventName === 'done') {
+                    removeLoader();
+                    ensureBubble();
+
+                    if (typeof payload?.assistant_message === 'string' && payload.assistant_message.length >= fullText.length) {
+                        fullText = payload.assistant_message;
+                    }
+
+                    updateBotMessageBubble(bubble, fullText);
+
+                    if (payload?.thread_id) {
+                        currentThreadId = payload.thread_id;
+                    }
+
+                    try {
+                        await reader.cancel();
+                    } catch {
+                    }
+
+                    await fetchThreads();
+                    return;
+                }
+
+                if (parsed.eventName === 'cancelled') {
+                    removeLoader();
+                    ensureBubble();
+
+                    const assistantMessage = String(payload?.assistant_message || fullText || '');
+                    updateBotMessageBubble(
+                        bubble,
+                        assistantMessage
+                            ? `${assistantMessage}\n\n**Warning**: The stream was cancelled.`
+                            : '**Warning**: The stream was cancelled.'
+                    );
+
+                    try {
+                        await reader.cancel();
+                    } catch {
+                    }
+
+                    return;
+                }
+
+                if (parsed.eventName === 'timeout') {
+                    shouldReconnect = true;
+
+                    try {
+                        await reader.cancel();
+                    } catch {
+                    }
+
+                    break;
+                }
+
+                if (parsed.eventName === 'error') {
+                    removeLoader();
+                    ensureBubble();
+                    updateBotMessageBubble(
+                        bubble,
+                        `**Error**: ${getErrorMessage(payload, 'Streaming failed.')}`
+                    );
+
+                    try {
+                        await reader.cancel();
+                    } catch {
+                    }
+
+                    return;
+                }
+            }
+
+            if (shouldReconnect) {
+                break;
+            }
+        }
+
+        const state = await fetchRunState(statusUrl);
+        if (state === 'SUCCESS') {
+            removeLoader();
+            if (bubble) {
+                updateBotMessageBubble(
+                    bubble,
+                    `${fullText}\n\n**Warning**: The run completed but the final event was not received.`
+                );
+            }
+            return;
+        }
+
+        if (state === 'CANCELLED') {
+            removeLoader();
+            const existingBubble = bubble || createBotMessageBubble('');
+            updateBotMessageBubble(
+                existingBubble,
+                fullText
+                    ? `${fullText}\n\n**Warning**: The stream was cancelled.`
+                    : '**Warning**: The stream was cancelled.'
+            );
+            return;
+        }
+
+        if (state === 'FAILURE') {
+            throw new Error('The async streaming run failed.');
+        }
+
+        reconnectCount += 1;
+        if (!shouldReconnect && reconnectCount > MAX_STREAM_RECONNECTS) {
+            break;
+        }
+
+        if (reconnectCount <= MAX_STREAM_RECONNECTS) {
+            await sleep(1000 * reconnectCount);
+        }
+    }
+
+    removeLoader();
+    if (bubble && fullText) {
+        updateBotMessageBubble(
+            bubble,
+            `${fullText}\n\n**Warning**: Streaming disconnected before completion.`
+        );
+        return;
+    }
+
+    throw new Error('Streaming disconnected before completion.');
+}
+
+async function sendStreamingMessage(text, userId) {
+    const startResponse = await fetch('/api/v1/chat/stream/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            message: text,
+            thread_id: currentThreadId,
+            user_id: userId
+        })
+    });
+
+    const startPayload = await startResponse.json().catch(() => null);
+    if (!startResponse.ok || startPayload?.status !== 'accepted') {
+        throw new Error(getErrorMessage(startPayload, 'Failed to start async streaming.'));
+    }
+
+    const eventsUrl = startPayload?.data?.events_url;
+    const statusUrl = startPayload?.data?.status_url;
+
+    if (!eventsUrl) {
+        throw new Error('The server did not return an events URL for the stream.');
+    }
+
+    await consumeAsyncStream(eventsUrl, statusUrl);
+}
+
 async function sendMessage() {
     const text = userInput.value.trim();
-    if (!text) return;
+    if (!text) {
+        return;
+    }
 
-    const userEmail = (userEmailInput?.value || '').trim();
-    if (!userEmail) {
-        appendBotMessage("⚠️ **Error**: Please enter your email first.");
-        userEmailInput?.focus();
+    const userId = getUserId();
+    if (!userId) {
+        appendBotMessage('**Error**: Enter a backend user ID first.');
+        userIdInput?.focus();
+        return;
+    }
+
+    if (!isValidUserId(userId)) {
+        appendBotMessage('**Error**: Enter a valid UUID user ID first.');
+        userIdInput?.focus();
         return;
     }
 
@@ -173,182 +634,123 @@ async function sendMessage() {
     appendLoader();
 
     try {
-        if (!useStreaming) {
-            const response = await fetch('/api/v1/chat/one-shot', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text, thread_id: currentThreadId, user_email: userEmail })
-            });
-
-            const json = await response.json();
+        if (useStreaming) {
+            await sendStreamingMessage(text, userId);
+        } else {
+            const assistantMessage = await sendOneShotMessage(text, userId);
             removeLoader();
-
-            if (response.ok && json.status === 'success') {
-                appendBotMessage(json.data.assistant_message || '');
-                await fetchThreads();
-            } else {
-                appendBotMessage("⚠️ **Error**: Something went wrong communicating with the server.");
-            }
-            return;
+            appendBotMessage(assistantMessage);
+            await fetchThreads();
         }
-
-        // Streaming mode (SSE)
-        const response = await fetch('/api/v1/chat/stream', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text, thread_id: currentThreadId, user_email: userEmail })
-        });
-
+    } catch (error) {
         removeLoader();
-
-        if (!response.ok || !response.body) {
-            appendBotMessage("⚠️ **Error**: Failed to start streaming.");
-            return;
-        }
-
-        const bubble = createBotMessageBubble('');
-        let fullText = '';
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let buffer = '';
-        let rafScheduled = false;
-
-        const scheduleRender = () => {
-            if (rafScheduled) return;
-            rafScheduled = true;
-            requestAnimationFrame(() => {
-                rafScheduled = false;
-                updateBotMessageBubble(bubble, fullText);
-            });
-        };
-
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-
-            const frames = buffer.split('\n\n');
-            buffer = frames.pop() || '';
-
-            for (const frame of frames) {
-                const lines = frame.split('\n').map(l => l.trimEnd());
-                let eventName = 'message';
-                let dataLine = '';
-
-                for (const line of lines) {
-                    if (line.startsWith('event:')) eventName = line.slice(6).trim();
-                    if (line.startsWith('data:')) dataLine += line.slice(5).trim();
-                }
-
-                if (!dataLine) continue;
-
-                let payload = null;
-                try { payload = JSON.parse(dataLine); } catch { payload = { raw: dataLine }; }
-
-                if (eventName === 'delta') {
-                    const delta = payload?.delta || '';
-                    if (delta) {
-                        fullText += delta;
-                        scheduleRender();
-                    }
-                } else if (eventName === 'done') {
-                    const assistantMessage = payload?.assistant_message;
-                    if (typeof assistantMessage === 'string' && assistantMessage.length >= fullText.length) {
-                        fullText = assistantMessage;
-                        scheduleRender();
-                    }
-                    await fetchThreads();
-                    try { await reader.cancel(); } catch {}
-                    return;
-                } else if (eventName === 'error') {
-                    const msg = payload?.message || 'Streaming error';
-                    updateBotMessageBubble(bubble, `⚠️ **Error**: ${msg}`);
-                    try { await reader.cancel(); } catch {}
-                    return;
-                }
-            }
-        }
-
-        // Stream ended without done
-        if (!fullText) updateBotMessageBubble(bubble, "⚠️ **Error**: Stream ended unexpectedly.");
-    } catch (e) {
-        removeLoader();
-        console.error(e);
-        appendBotMessage("⚠️ **Error**: Failed to connect to server.");
+        console.error(error);
+        appendBotMessage(`**Error**: ${error?.message || 'Failed to connect to the server.'}`);
     } finally {
         sendBtn.disabled = false;
         userInput.focus();
     }
 }
 
-//  Conversation History 
-
-async function fetchThreads() {
-    try {
-        const res = await fetch('/api/v1/chat/threads');
-        const json = await res.json();
-        if (json.status === 'success') {
-            // Newest first — the backend returns in insertion order
-            allThreads = json.data.slice().reverse();
-            renderThreadList();
-        }
-    } catch (e) {
-        console.error("Failed to fetch history:", e);
-    }
-}
-
-function renderThreadList() {
-    const list = document.getElementById('threadList');
-    list.innerHTML = '';
-
-    if (allThreads.length === 0) {
-        const empty = document.createElement('li');
-        empty.className = 'thread-empty';
-        empty.textContent = 'لا توجد محادثات سابقة';
-        list.appendChild(empty);
+async function switchThread(threadId) {
+    if (threadId === currentThreadId) {
         return;
     }
 
-    allThreads.forEach(thread => {
-        const li = document.createElement('li');
-        li.className = 'thread-item';
-        if (thread.id === currentThreadId) {
-            li.classList.add('active');
-        }
-        li.textContent = thread.preview;
-        li.title = thread.preview;
-        li.onclick = () => switchThread(thread.id);
-        list.appendChild(li);
-    });
-}
-
-async function switchThread(threadId) {
-    if (threadId === currentThreadId) return;
+    const userId = getUserId();
+    if (!isValidUserId(userId)) {
+        appendBotMessage('**Error**: Enter a valid UUID user ID before loading a conversation.');
+        userIdInput?.focus();
+        return;
+    }
 
     try {
-        const res = await fetch(`/api/v1/chat/threads/${threadId}/history`);
-        const json = await res.json();
+        const res = await fetch(
+            `/api/v1/chat/threads/${encodeURIComponent(threadId)}/history?user_id=${encodeURIComponent(userId)}`
+        );
+        const json = await res.json().catch(() => null);
 
-        if (json.status === 'success') {
-            currentThreadId = threadId;
-            renderThreadList();
-            chatWindow.innerHTML = '';
-
-            if (json.data.length === 0) {
-                chatWindow.innerHTML = INTRO_MSG;
-            } else {
-                json.data.forEach(msg => {
-                    if (msg.role === 'user') appendUserMessage(msg.content);
-                    else appendBotMessage(msg.content);
-                });
-            }
-
-            if (window.innerWidth <= 768) {
-                document.getElementById('sidebar').classList.remove('open');
-            }
+        if (!res.ok || json?.status !== 'success') {
+            throw new Error(getErrorMessage(json, 'Failed to load conversation history.'));
         }
-    } catch (e) {
-        console.error("Failed to switch thread:", e);
+
+        currentThreadId = threadId;
+        renderThreadList();
+        chatWindow.innerHTML = '';
+
+        const items = Array.isArray(json.data) ? json.data : [];
+        if (!items.length) {
+            chatWindow.innerHTML = INTRO_MSG;
+        } else {
+            items.forEach(message => {
+                if (message.role === 'user') {
+                    appendUserMessage(message.content);
+                } else {
+                    appendBotMessage(message.content);
+                }
+            });
+        }
+
+        if (window.innerWidth <= 768) {
+            document.getElementById('sidebar').classList.remove('open');
+        }
+    } catch (error) {
+        console.error('Failed to switch thread:', error);
+        appendBotMessage(`**Error**: ${error?.message || 'Failed to load conversation history.'}`);
     }
 }
+
+window.addEventListener('DOMContentLoaded', async () => {
+    const savedUserId = localStorage.getItem(LS_USER_ID);
+    if (savedUserId && userIdInput) {
+        userIdInput.value = savedUserId;
+    }
+
+    const savedStreaming = localStorage.getItem(LS_USE_STREAMING);
+    useStreaming = savedStreaming === 'true';
+    if (streamToggle) {
+        streamToggle.checked = useStreaming;
+    }
+
+    if (userIdInput) {
+        userIdInput.addEventListener('change', async () => {
+            const userId = getUserId();
+
+            if (userId) {
+                localStorage.setItem(LS_USER_ID, userId);
+            } else {
+                localStorage.removeItem(LS_USER_ID);
+            }
+
+            await refreshForCurrentUser();
+        });
+    }
+
+    if (streamToggle) {
+        streamToggle.addEventListener('change', () => {
+            useStreaming = Boolean(streamToggle.checked);
+            localStorage.setItem(LS_USE_STREAMING, String(useStreaming));
+        });
+    }
+
+    startNewThread();
+    if (isValidUserId()) {
+        await fetchThreads();
+    } else {
+        renderThreadList();
+    }
+});
+
+userInput.addEventListener('input', function () {
+    this.style.height = '48px';
+    this.style.height = `${Math.min(this.scrollHeight, 150)}px`;
+});
+
+userInput.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+    }
+});
+
+sendBtn.addEventListener('click', sendMessage);

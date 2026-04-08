@@ -209,7 +209,7 @@ body {
     text-align: center;
     opacity: 0.6;
     font-style: italic;
-    direction: rtl;
+    direction: ltr;
 }
 
 /* ============================
@@ -282,10 +282,16 @@ body {
     align-items: center;
     gap: var(--space-sm);
     flex-shrink: 0;
+    flex-wrap: wrap;
+    justify-content: flex-end;
 }
 
-.email-wrap input {
-    width: clamp(160px, 18vw, 240px);
+.user-id-wrap {
+    min-width: 0;
+}
+
+.user-id-wrap input {
+    width: clamp(220px, 24vw, 320px);
     height: 38px;
     padding: 0 var(--space-md);
     border-radius: 0.75rem;
@@ -294,13 +300,14 @@ body {
     color: var(--text-primary);
     outline: none;
     font-size: var(--fs-sm);
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
-.email-wrap input::placeholder {
+.user-id-wrap input::placeholder {
     color: rgba(160, 164, 184, 0.9);
 }
 
-.email-wrap input:focus {
+.user-id-wrap input:focus {
     border-color: rgba(123, 97, 255, 0.5);
     box-shadow: 0 0 0 3px rgba(123, 97, 255, 0.15);
 }
@@ -670,6 +677,23 @@ textarea::placeholder {
     .sidebar.open {
         transform: translateX(0);
         box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
+    }
+
+    .chat-header {
+        flex-wrap: wrap;
+    }
+
+    .header-controls {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .user-id-wrap {
+        flex: 1;
+    }
+
+    .user-id-wrap input {
+        width: 100%;
     }
 
     .message {
