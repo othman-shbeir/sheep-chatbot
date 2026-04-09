@@ -11,6 +11,7 @@ from celery.result import AsyncResult
 from flask import Blueprint, Response, jsonify, render_template, request, url_for
 
 from app.celery_app import celery_app
+from app.config import Config
 from app.core.logging_config import get_logger, get_request_id, logging_context
 from app.routes.chat_helpers import (
     build_pagination_metadata,
@@ -106,7 +107,10 @@ def ui():
       200:
         description: Returns the HTML chat interface.
     """
-    return render_template("index.html")
+    return render_template(
+        "index.html",
+        default_user_id=Config.DEFAULT_USER_ID,
+    )
 
 
 @chat_bp.route("/one-shot", methods=["POST"])

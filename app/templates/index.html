@@ -52,7 +52,8 @@
                 <div class="header-controls">
                     <div class="user-id-wrap">
                         <input id="userId" type="text" inputmode="text" autocomplete="off" autocapitalize="off"
-                            spellcheck="false" placeholder="User ID (UUID)" aria-label="Backend user ID" />
+                            spellcheck="false" placeholder="User ID (UUID)" aria-label="Backend user ID"
+                            value="{{ default_user_id or '' }}" />
                     </div>
                     <label class="stream-toggle" title="Toggle async streaming responses">
                         <input id="streamToggle" type="checkbox" />
