@@ -19,6 +19,13 @@ from app.core.logging_config import get_logger
 
 logger = get_logger("system", __name__)
 
+PRIMARY_MODEL = "gemini-2.5-flash-lite"
+FALLBACK_MODEL = "gemini-2.5-flash"
+
+
+# PRIMARY_MODEL = "gemini-2.5-flash"
+# FALLBACK_MODEL = "gemini-2.5-flash-lite"
+
 SYSTEM_PROMPT = """
 You are a helpful, warm, and knowledgeable AI assistant.
 
@@ -87,8 +94,9 @@ def get_llm() -> ChatGoogleGenerativeAI:
     if not google_api_key:
         raise ValueError("GOOGLE_API_KEY is not set in the environment.")
 
+    logger.debug("Creating primary LLM client model=%s", PRIMARY_MODEL)
     return ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model=PRIMARY_MODEL,
         api_key=google_api_key,
         temperature=0.0,
         max_retries=2,
@@ -97,7 +105,218 @@ def get_llm() -> ChatGoogleGenerativeAI:
 
 @lru_cache(maxsize=1)
 def get_model_with_search():
+    logger.debug("Binding Google Search tool to primary model=%s", PRIMARY_MODEL)
     return get_llm().bind_tools([{"google_search": {}}])
+
+
+def get_fallback_llm() -> ChatGoogleGenerativeAI:
+    """Instantiated fresh on each fallback — intentionally not cached."""
+    google_api_key = Config.GOOGLE_API_KEY
+    if not google_api_key:
+        raise ValueError("GOOGLE_API_KEY is not set in the environment.")
+
+    logger.debug("Creating fallback LLM client model=%s", FALLBACK_MODEL)
+    return ChatGoogleGenerativeAI(
+        model=FALLBACK_MODEL,
+        api_key=google_api_key,
+        temperature=0.0,
+        max_retries=2,
+    )
+
+
+def get_fallback_model_with_search():
+    """Fallback model with Google Search tool bound."""
+    logger.debug("Binding Google Search tool to fallback model=%s", FALLBACK_MODEL)
+    return get_fallback_llm().bind_tools([{"google_search": {}}])
+
+
+def _describe_model_error(error: Exception) -> tuple[str, str]:
+    error_type = type(error).__name__
+    error_message = str(error).strip() or "<no error message>"
+    return error_type, error_message
+
+
+def _invoke_model_with_fallback(
+    *,
+    operation_name: str,
+    messages: list,
+    search_enabled: bool,
+    primary_call,
+    fallback_call,
+) -> tuple[object, str]:
+    message_count = len(messages)
+    logger.info(
+        "LLM request started operation=%s primary_model=%s fallback_model=%s search_enabled=%s message_count=%s",
+        operation_name,
+        PRIMARY_MODEL,
+        FALLBACK_MODEL,
+        search_enabled,
+        message_count,
+    )
+
+    try:
+        response = primary_call()
+    except Exception as primary_error:
+        error_type, error_message = _describe_model_error(primary_error)
+        logger.warning(
+            "Primary LLM request failed operation=%s model=%s search_enabled=%s message_count=%s error_type=%s error=%s. Retrying with fallback model=%s",
+            operation_name,
+            PRIMARY_MODEL,
+            search_enabled,
+            message_count,
+            error_type,
+            error_message,
+            FALLBACK_MODEL,
+        )
+        try:
+            response = fallback_call()
+        except Exception:
+            logger.exception(
+                "Fallback LLM request failed operation=%s primary_model=%s fallback_model=%s search_enabled=%s message_count=%s",
+                operation_name,
+                PRIMARY_MODEL,
+                FALLBACK_MODEL,
+                search_enabled,
+                message_count,
+            )
+            raise
+
+        logger.info(
+            "Fallback LLM request succeeded operation=%s model=%s search_enabled=%s message_count=%s",
+            operation_name,
+            FALLBACK_MODEL,
+            search_enabled,
+            message_count,
+        )
+        return response, FALLBACK_MODEL
+
+    logger.info(
+        "Primary LLM request succeeded operation=%s model=%s search_enabled=%s message_count=%s",
+        operation_name,
+        PRIMARY_MODEL,
+        search_enabled,
+        message_count,
+    )
+    return response, PRIMARY_MODEL
+
+
+def _invoke_with_fallback(messages: list) -> tuple[object, str]:
+    """
+    Invoke the chat model and log the full primary/fallback lifecycle.
+    """
+    return _invoke_model_with_fallback(
+        operation_name="chat_response",
+        messages=messages,
+        search_enabled=True,
+        primary_call=lambda: get_model_with_search().invoke(messages),
+        fallback_call=lambda: get_fallback_model_with_search().invoke(messages),
+    )
+
+
+def _stream_with_fallback(messages: list):
+    """
+    Stream from the primary model and fall back only if startup fails.
+    Once output has started, re-raising is safer than restarting on a second model.
+    """
+    message_count = len(messages)
+    operation_name = "chat_stream"
+    logger.info(
+        "LLM stream started operation=%s primary_model=%s fallback_model=%s search_enabled=%s message_count=%s",
+        operation_name,
+        PRIMARY_MODEL,
+        FALLBACK_MODEL,
+        True,
+        message_count,
+    )
+
+    try:
+        primary_stream = iter(get_model_with_search().stream(messages))
+        first_chunk = next(primary_stream)
+    except StopIteration:
+        logger.info(
+            "Primary LLM stream completed operation=%s model=%s chunk_count=%s",
+            operation_name,
+            PRIMARY_MODEL,
+            0,
+        )
+        return
+    except Exception as primary_error:
+        error_type, error_message = _describe_model_error(primary_error)
+        logger.warning(
+            "Primary LLM stream failed before first chunk operation=%s model=%s search_enabled=%s message_count=%s error_type=%s error=%s. Retrying with fallback model=%s",
+            operation_name,
+            PRIMARY_MODEL,
+            True,
+            message_count,
+            error_type,
+            error_message,
+            FALLBACK_MODEL,
+        )
+
+        fallback_chunk_count = 0
+        try:
+            for chunk in get_fallback_model_with_search().stream(messages):
+                fallback_chunk_count += 1
+                yield chunk
+        except Exception:
+            logger.exception(
+                "Fallback LLM stream failed operation=%s primary_model=%s fallback_model=%s search_enabled=%s message_count=%s",
+                operation_name,
+                PRIMARY_MODEL,
+                FALLBACK_MODEL,
+                True,
+                message_count,
+            )
+            raise
+
+        logger.info(
+            "Fallback LLM stream completed operation=%s model=%s chunk_count=%s",
+            operation_name,
+            FALLBACK_MODEL,
+            fallback_chunk_count,
+        )
+        return
+
+    primary_chunk_count = 1
+    logger.info(
+        "Primary LLM stream produced first chunk operation=%s model=%s",
+        operation_name,
+        PRIMARY_MODEL,
+    )
+    yield first_chunk
+
+    try:
+        for chunk in primary_stream:
+            primary_chunk_count += 1
+            yield chunk
+    except Exception:
+        logger.exception(
+            "Primary LLM stream failed after output started operation=%s model=%s emitted_chunk_count=%s. Fallback skipped to avoid duplicate output.",
+            operation_name,
+            PRIMARY_MODEL,
+            primary_chunk_count,
+        )
+        raise
+
+    logger.info(
+        "Primary LLM stream completed operation=%s model=%s chunk_count=%s",
+        operation_name,
+        PRIMARY_MODEL,
+        primary_chunk_count,
+    )
+
+
+def _invoke_summarizer_with_fallback(messages: list) -> tuple[object, str]:
+    """
+    Invoke the summarizer and log the full primary/fallback lifecycle.
+    """
+    return _invoke_model_with_fallback(
+        operation_name="thread_summary",
+        messages=messages,
+        search_enabled=False,
+        primary_call=lambda: get_llm().invoke(messages),
+        fallback_call=lambda: get_fallback_llm().invoke(messages),
+    )
 
 
 def _normalize_required_text(value: str, field_name: str) -> str:
@@ -263,7 +482,9 @@ def maybe_compact_thread(
             )
 
         prompt = SUMMARY_PROMPT_TEMPLATE.format(conversation_text=conversation_text)
-        summary_response = get_llm().invoke([HumanMessage(content=prompt)])
+        summary_response, summary_model_name = _invoke_summarizer_with_fallback(
+            [HumanMessage(content=prompt)]
+        )
         summary_text = extract_text_content(summary_response)
 
         last_msg = messages_to_summarize[-1]
@@ -274,7 +495,7 @@ def maybe_compact_thread(
             summary_text=summary_text,
             covered_until_message_id=last_msg.id,
             covered_until_order=last_msg.message_order,
-            model_name="gemini-2.5-flash",
+            model_name=summary_model_name,
             metadata_json={"strategy": "rolling_summary"},
         )
 
@@ -294,7 +515,7 @@ def run_agent(
     )
 
     context_messages = build_context_messages(thread_id)
-    response = get_model_with_search().invoke(context_messages)
+    response, _ = _invoke_with_fallback(context_messages)
     assistant_text = extract_text_content(response)
 
     _store_assistant_message(thread_id, assistant_text)
@@ -318,7 +539,7 @@ def run_agent_stream(
     context_messages = build_context_messages(thread_id)
 
     assistant_parts: list[str] = []
-    for chunk in get_model_with_search().stream(context_messages):
+    for chunk in _stream_with_fallback(context_messages):
         delta = extract_stream_text_content(chunk)
         if not delta:
             continue
@@ -329,4 +550,3 @@ def run_agent_stream(
 
     _store_assistant_message(thread_id, assistant_text)
     maybe_compact_thread(thread_id)
-
