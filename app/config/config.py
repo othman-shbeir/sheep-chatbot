@@ -20,6 +20,18 @@ class Config:
 
     # Database
     DATABASE_URL: str | None = os.getenv("DATABASE_URL")
+    DEFAULT_USER_ID: str = os.getenv(
+        "DEFAULT_USER_ID",
+        "00000000-0000-4000-8000-000000000001",
+    )
+    DEFAULT_USER_EMAIL: str = os.getenv(
+        "DEFAULT_USER_EMAIL",
+        "demo@sheep.local",
+    )
+    DEFAULT_USER_NAME: str = os.getenv(
+        "DEFAULT_USER_NAME",
+        "Sheep Demo User",
+    )
 
     # Redis
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379/0")
