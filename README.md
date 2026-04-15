@@ -4,8 +4,51 @@ An AI-powered chatbot specializing in sheep farming, livestock care, and general
 
 ---
 
-## 🏗️ Architecture
+## 🗂️ Project Structure
 
+```text
+├── app/
+│   ├── __init__.py         # Flask application factory & Swagger config
+│   ├── celery_app.py       # Celery app factory, queue routing & signal hooks
+│   ├── logger.py           # Application logger
+│   ├── agents/
+│   │   └── agent.py        # LangChain agent — LLM invocation, streaming,
+│   │                       #   primary/fallback logic, rolling summary compaction
+│   ├── auth/               # Authentication & authorization
+│   ├── config/             # Application configuration (env-driven)
+│   ├── core/
+│   │   └── logging_config.py  # Structured logging, request-id correlation
+│   ├── db/
+│   │   ├── database.py     # SQLAlchemy engine & session factory
+│   │   ├── models.py       # ORM models: User, Thread, ThreadMessage, ThreadSummary
+│   │   ├── repository.py   # Data access layer (CRUD queries)
+│   │   └── bootstrap.py    # Database initialization & seed data
+│   ├── routes/
+│   │   ├── chat.py         # All REST & SSE endpoint definitions
+│   │   └── chat_helpers.py # Request parsing & pagination utilities
+│   ├── services/
+│   │   ├── agent.py        # Service layer — thread management & history retrieval
+│   │   ├── stream_service.py  # Redis Streams SSE event publishing & lifecycle
+│   │   └── redis_client.py # Shared Redis connection pool (singleton)
+│   ├── tasks/
+│   │   ├── chat_tasks.py       # Celery task: one-shot chat processing
+│   │   └── chat_stream_task.py # Celery task: streaming chat with Redis events
+│   ├── templates/          # Jinja2 HTML templates (chat UI)
+│   ├── static/             # Static assets (CSS, JS)
+│   └── utils/              # General utilities (SSE formatting, etc.)
+├── cli/                    # CLI tools & helper scripts
+├── tests/                  # Test suite
+├── .env.example            # Environment variable template
+├── Dockerfile              # Python 3.11 application image
+├── docker-compose.yml      # Development stack
+├── docker-compose.prod.yml # Production stack (optimized)
+├── requirements.txt        # Python dependencies
+└── run.py                  # Development entry point (Flask dev server)
+```
+
+---
+
+## 🏗️ Architecture
 ### System Flow
 
 ```mermaid
@@ -126,49 +169,6 @@ All chat endpoints are mounted under `/api/v1/chat`.
 
 ---
 
-## 🗂️ Project Structure
-
-```text
-├── app/
-│   ├── __init__.py         # Flask application factory & Swagger config
-│   ├── celery_app.py       # Celery app factory, queue routing & signal hooks
-│   ├── logger.py           # Application logger
-│   ├── agents/
-│   │   └── agent.py        # LangChain agent — LLM invocation, streaming,
-│   │                       #   primary/fallback logic, rolling summary compaction
-│   ├── auth/               # Authentication & authorization
-│   ├── config/             # Application configuration (env-driven)
-│   ├── core/
-│   │   └── logging_config.py  # Structured logging, request-id correlation
-│   ├── db/
-│   │   ├── database.py     # SQLAlchemy engine & session factory
-│   │   ├── models.py       # ORM models: User, Thread, ThreadMessage, ThreadSummary
-│   │   ├── repository.py   # Data access layer (CRUD queries)
-│   │   └── bootstrap.py    # Database initialization & seed data
-│   ├── routes/
-│   │   ├── chat.py         # All REST & SSE endpoint definitions
-│   │   └── chat_helpers.py # Request parsing & pagination utilities
-│   ├── services/
-│   │   ├── agent.py        # Service layer — thread management & history retrieval
-│   │   ├── stream_service.py  # Redis Streams SSE event publishing & lifecycle
-│   │   └── redis_client.py # Shared Redis connection pool (singleton)
-│   ├── tasks/
-│   │   ├── chat_tasks.py       # Celery task: one-shot chat processing
-│   │   └── chat_stream_task.py # Celery task: streaming chat with Redis events
-│   ├── templates/          # Jinja2 HTML templates (chat UI)
-│   ├── static/             # Static assets (CSS, JS)
-│   └── utils/              # General utilities (SSE formatting, etc.)
-├── cli/                    # CLI tools & helper scripts
-├── tests/                  # Test suite
-├── .env.example            # Environment variable template
-├── Dockerfile              # Python 3.11 application image
-├── docker-compose.yml      # Development stack
-├── docker-compose.prod.yml # Production stack (optimized)
-├── requirements.txt        # Python dependencies
-└── run.py                  # Development entry point (Flask dev server)
-```
-
----
 
 ## ⚙️ Prerequisites
 
@@ -196,10 +196,10 @@ Edit `.env` and set at minimum:
 
 | Variable         | Required | Description                          |
 | ---------------- | -------- | ------------------------------------ |
-| `GOOGLE_API_KEY` | ✅        | Google Gemini API key                |
-| `POSTGRES_DB`    | —        | Database name (default: `sheep_chatbot`) |
-| `POSTGRES_USER`  | —        | DB user (default: `postgres`)        |
-| `POSTGRES_PASSWORD` | —     | DB password (default: `postgres`)    |
+| `GOOGLE_API_KEY` | Yes        | Google Gemini API key                |
+| `POSTGRES_DB`    | No        | Database name (default: `sheep_chatbot`) |
+| `POSTGRES_USER`  | No        | DB user (default: `postgres`)        |
+| `POSTGRES_PASSWORD` | No     | DB password (default: `postgres`)    |
 
 > All other variables have sensible defaults for local development. See `.env.example` for the full list.
 
@@ -215,7 +215,7 @@ The `db-init` container will automatically create tables and seed the default us
 
 ```bash
 curl http://localhost:5000/
-# → {"status": "success", "message": "The application works properly.", "data": null}
+#  {"status": "success", "message": "The application works properly.", "data": null}
 ```
 
 ---
@@ -243,7 +243,7 @@ Default RabbitMQ credentials: `guest` / `guest` (configurable via `.env`).
 
 ## 🧠 Key Design Decisions
 
-- **Primary / Fallback LLM:** Every request tries `gemini-2.5-flash-lite` first, then falls back to `gemini-2.5-flash` on failure — balancing cost and reliability.
+- **Primary / Fallback LLM:** Every request tries `gemini-2.5-flash-lite` first, then falls back to `gemini-2.5-flash` on failure, balancing cost and reliability.
 - **Rolling Summary Compaction:** Long conversations are periodically summarized to keep the context window within LLM token limits while preserving conversational memory.
 - **Dual Celery Queues:** `chat` (one-shot) and `stream` (SSE) queues are isolated so streaming workloads don't block simple chat requests.
 - **Redis Streams for SSE:** Streaming responses are published to Redis Streams, enabling reconnectable SSE with `Last-Event-ID` support and automatic TTL cleanup.
