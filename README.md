@@ -127,7 +127,7 @@ graph LR
 | Service          | Port(s)      | Description                                     |
 | ---------------- | ------------ | ----------------------------------------------- |
 | `web`            | 5000         | Flask API server (Gunicorn in production)        |
-| `postgres`       | 5432         | PostgreSQL 16 — persistent chat & user storage   |
+| `postgres`       | 5432         | PostgreSQL 16, persistent chat & user storage   |
 | `rabbitmq`       | 5672 / 15672 | Message broker + management UI                   |
 | `redis`          | 6379         | Celery result backend & SSE stream state store   |
 | `celery-chat`    | —            | Celery worker consuming the `chat` queue         |
